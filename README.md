@@ -125,23 +125,27 @@ Todo con la cuenta **ccentenario3090@gmail.com**. Nunca compartas contraseñas n
 
 **Calendario de la profesional (opcional):** hoy no se usa; la disponibilidad la carga el equipo en Horarios. Si más adelante se quiere cruzar y escribir también en su calendario, cargar `PRO_CALENDAR_ID` en Propiedades del script.
 
-## 7 bis. Análisis de piel con IA
+## 7 bis. Orientación para tu piel (cuestionario + foto opcional)
 
-La persona sube o saca una foto, marca que es mayor de 18 y que acepta el análisis, y recibe en texto: tipo de piel estimado (seca, grasa, mixta, normal o indeterminado) con nivel de confianza, lo que se observa en la foto, qué se podría trabajar en la sesión, consejos generales y, si corresponde, la recomendación de consultar a un médico. Termina con el botón para reservar.
+Recorrido: introducción (18+) → datos de contacto (la misma solicitud sirve para reservar) → 9 preguntas con condicionales → foto opcional → resultado → reservar.
 
-**Resguardos implementados**
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| Cuestionario | `public/app.js` (`QUIZ`) | Brillo, tirantez, descamación, reactividad, imperfecciones, objetivo, exfoliantes/retinoides, procedimientos recientes, lesiones. "No sé" donde corresponde |
+| Control técnico de la foto | `public/app.js` (`PHOTO_RULES`), en el teléfono | MediaPipe Face Landmarker (Apache-2.0): un solo rostro, encuadre y tamaño, giro e inclinación, nitidez, exposición (recortes y contraste, no brillo promedio) y aviso de luz despareja. **No detecta maquillaje ni filtros**: se le pide a la persona. Si no puede revisar la foto, no la usa |
+| Reglas de orientación | `backend/Orientation.gs` (`ORIENTATION_RULES_VERSION`) | Tipo de piel solo con el cuestionario (si se contradice: el más probable, con aviso), necesidades referidas, beneficios posibles, límites, "para ver en la consulta" y cuidados básicos. Cada conclusión lleva origen y regla |
+| Descripción de la foto | `backend/Analysis.gs` | Claude describe solo lo claramente visible, en categorías cerradas, con salida estructurada. Es un modelo general **no validado para piel**: la landing lo aclara ("orientativo y analizado por IA, no certificado por profesionales") |
+| Registro | Pestaña "Análisis de piel" | Resultado con origen y regla de cada conclusión, versión de reglas y si hubo foto. **No se guardan la foto ni las respuestas** |
 
-- **No diagnostica.** Las instrucciones al modelo prohíben nombrar condiciones médicas, y además el servidor descarta cualquier texto con términos diagnósticos o promesas (acné, rosácea, melasma, "curar", "eliminar manchas", "rejuvenecer", etc.). Si hay algo que amerita consulta médica, se recomienda consultar sin nombrar la condición.
-- **Solo técnicas del protocolo.** Las sugerencias para la sesión salen de una lista cerrada (sin peeling químico) y se aclara que la profesional las define en la evaluación.
-- **Foto:** se reduce a 1024 px y se re-codifica en el teléfono, lo que borra EXIF y GPS. Se envía al proveedor de IA solo para responder; **no se guarda** en Sheets, Drive, caché ni logs. En la planilla solo se registra que hubo un análisis, sin resultado ni datos de la persona.
-- **Menores:** si la persona parece menor de 18, no se analiza.
-- **Fotos no aptas** (oscuras, sin rostro, con filtros, varias personas): pide otra foto con indicaciones.
-- **Costo y abuso:** topes globales por hora y por día y por dispositivo (`AI_MAX_PER_HOUR`, `AI_MAX_PER_DAY`, `AI_MAX_PER_CLIENT_DAY`), más Turnstile si está configurado.
-- **Sin simulaciones en producción:** si la IA no está configurada, la sección lo informa; en la vista previa el resultado es un ejemplo fijo, marcado como tal.
+**Decisiones de la clínica:** no se recomiendan productos, técnicas ni tratamientos; no se deriva a otros profesionales, lo complejo queda "para ver con la profesional en la consulta"; los beneficios se basan en lo que se encontró; los cuidados son básicos y cortos.
 
-**Para activarlo:** crear una clave en console.anthropic.com (cuenta de la clínica, con límite de gasto), cargarla como secreto `ANTHROPIC_API_KEY` en Propiedades del script y poner `AI_ENABLED=true`. El modelo se elige con `AI_MODEL` (por defecto `claude-sonnet-5-5`; `claude-haiku-5-5` es más económico). Para ocultar la sección: `AI_ANALYSIS_ENABLED: false` en `config.js`.
+**Resguardos:** el servidor descarta textos con términos diagnósticos, porcentajes o promesas; la foto viaja a Anthropic solo con consentimiento específico, se reduce y re-codifica en el teléfono (sin EXIF/GPS) y no se guarda; si la IA falla, rechaza o llega al tope de uso, la orientación sale igual con el cuestionario; topes por hora, día y dispositivo; analítica solo con hitos del recorrido (`analisis_inicio`, `analisis_cuestionario_completo`, `analisis_foto_aceptada/rechazada`, `analisis_resultado`, `analisis_clic_reserva`), sin respuestas ni hallazgos.
 
-**A validar antes de publicar:** la foto del rostro es un dato personal sensible y se procesa con un proveedor en el exterior. El aviso de privacidad ya lo informa, pero conviene que un asesor confirme el texto y el registro ante la URCDP según la Ley 18.331.
+**Para activar la foto:** cargar el secreto `ANTHROPIC_API_KEY` en Propiedades del script (con límite de gasto en la consola de Anthropic). Sin clave, el recorrido funciona solo con el cuestionario.
+
+**Pruebas:** `tests/analysis.test.js` (reglas, contradicciones, respuestas incompletas, fallo y rechazo de la IA, filtros, consentimientos, privacidad) y `tests/e2e_orientacion.py` (recorrido completo y controles de foto a partir de una selfie de prueba). **Pendiente antes de anunciar la foto:** probar con selfies reales de distintos tonos de piel, teléfonos y luces para calibrar `PHOTO_RULES`, y revisar que las descripciones de la IA sean correctas en esos casos.
+
+**A validar:** la foto del rostro es un dato personal y se procesa con un proveedor en el exterior; conviene que un asesor confirme el aviso de privacidad y el registro ante la URCDP (Ley 18.331).
 
 ## 8. Pendientes centralizados
 
@@ -155,7 +159,7 @@ La persona sube o saca una foto, marca que es mayor de 18 y que acepta el análi
 | Cancelación y reprogramación | `config.js` → `CANCELLATION_POLICY` | No se muestra; no hay autogestión de cambios |
 | Canal para derechos de datos personales | `config.js` → `PRIVACY_CONTACT` | El aviso no nombra canal |
 | URL definitiva | `config.js` → `CANONICAL_URL` y `index.html` | Se usa `/limpieza-facial` |
-| Análisis de piel con IA | Otra etapa: `ANTHROPIC_API_KEY`, `AI_ENABLED=true` y `AI_ANALYSIS_ENABLED` | La sección no se muestra |
+| Foto en la orientación de piel | Secreto `ANTHROPIC_API_KEY` | La orientación funciona solo con el cuestionario |
 
 ## 9. Pruebas
 

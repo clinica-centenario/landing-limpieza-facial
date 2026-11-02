@@ -476,124 +476,326 @@
     }
   })();
 
-  // ── Análisis de piel con IA ───────────────────────────────
-  // La foto se reduce y se re-codifica en el dispositivo (sin EXIF ni GPS) y no se guarda en ningún almacenamiento.
-  (function aiAnalysis() {
-    if (!CFG.AI_ANALYSIS_ENABLED) return;
-    // La sección aparece solo si el servidor tiene el análisis listo (clave de IA cargada).
-    var ready = DEMO ? Promise.resolve(true) : !CFG.API_URL ? Promise.resolve(false) :
-      fetch(CFG.API_URL).then(function (r) { return r.json(); }).then(function (j) { return !!j.aiReady; }).catch(function () { return false; });
-    ready.then(function (ok) { if (ok) aiInit(); });
-  })();
+  // ── Orientación de la piel (cuestionario + foto opcional) ─
+  // Recorrido: introducción → datos → cuestionario → foto (opcional) → resultado.
+  // El tipo de piel sale de las respuestas; la foto, si la hay, la describe una IA (no validada para piel).
+  // La foto se controla en el dispositivo (MediaPipe), se reduce y re-codifica sin metadatos, y no se guarda.
+  // Analítica: solo hitos del recorrido, nunca respuestas, perfiles ni hallazgos.
+  var QUIZ = [
+    { k: 'brillo', q: 'A media tarde, ¿cómo está tu piel?', o: [['toda', 'Con brillo en toda la cara'], ['zona_t', 'Con brillo solo en frente, nariz y mentón'], ['no', 'Sin brillo notable'], ['nose', 'No sé']] },
+    { k: 'tirantez', q: 'Después de lavarte la cara, ¿sentís tirantez?', o: [['siempre', 'Sí, casi siempre'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
+    { k: 'descamacion', q: '¿Notás zonas que se descaman o se sienten ásperas y secas?', o: [['si', 'Sí'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
+    { k: 'reactividad', q: '¿Tu piel arde, pica o se enrojece con algunos productos?', o: [['seguido', 'Sí, seguido'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
+    { k: 'imperfecciones', multi: true, q: '¿Qué notás en tu piel? Podés marcar varias.', o: [['puntos_negros', 'Puntos negros'], ['granitos', 'Granitos de vez en cuando'], ['poros', 'Poros marcados'], ['textura', 'Textura irregular'], ['nada', 'Nada en especial'], ['nose', 'No sé']] },
+    { k: 'objetivo', q: '¿Qué te gustaría lograr principalmente?', o: [['suavidad', 'Piel más suave'], ['luminosidad', 'Más luminosidad'], ['confort', 'Más confort'], ['limpieza', 'Sensación de limpieza'], ['otro', 'Otro']] },
+    { k: 'exfoliantes', q: '¿Usás exfoliantes o productos con retinoides (retinol, ácido retinoico)?', o: [['si', 'Sí'], ['no', 'No'], ['nose', 'No sé']],
+      follow: { k: 'exfoliantes_cual', when: 'si', q: '¿Cuáles?', o: [['exfoliante', 'Exfoliantes'], ['retinoide', 'Retinoides'], ['ambos', 'Los dos'], ['nose', 'No sé']] } },
+    { k: 'procedimiento', q: 'En el último mes, ¿te hiciste algún procedimiento o tratamiento en el rostro (peeling, láser u otro)?', o: [['si', 'Sí'], ['no', 'No'], ['nose', 'No sé']],
+      follow: { k: 'procedimiento_tipo', when: 'si', q: '¿De qué tipo?', o: [['estetico', 'Estético'], ['medico', 'Indicado por un profesional de la salud'], ['otro', 'Otro']] } },
+    { k: 'lesiones', q: '¿Tenés ahora irritación fuerte, heridas, lesiones que duelen, o algo en la piel que cambia o sangra?', o: [['si', 'Sí'], ['no', 'No']] }
+  ];
 
-  function aiInit() {
+  // Controles técnicos de la foto. Valores iniciales: calibrarlos con fotos reales de distintos tonos de piel,
+  // teléfonos y luces. La exposición se mide por recortes extremos y contraste, no por brillo promedio,
+  // para no penalizar pieles oscuras. Maquillaje, filtros y modo belleza NO se detectan: se pide a la persona.
+  var PHOTO_RULES = { minFaceWidth: 0.28, minYawBalance: 0.55, maxRollDeg: 12, minSharpness: 45,
+    maxClipHigh: 0.12, maxClipLow: 0.30, minContrast: 30, maxCheekRatio: 1.7 };
+  var MP_VER = '0.10.14';
+  var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + MP_VER;
+  var MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+
+  (function skinOrientation() {
+    if (!CFG.AI_ANALYSIS_ENABLED) return;
     $('#analisis').hidden = false; $('#aiHeroLink').hidden = false;
-    // Paso 1: datos de contacto (la misma solicitud sirve para reservar sin volver a cargarlos).
-    var aiLead = $('#aiLead');
-    function showPhotoStep() { aiLead.hidden = true; $('#aiPick').hidden = false; }
-    if (session) showPhotoStep();
-    bindLeadForm({ form: aiLead, btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
+    var card = $('#analisis .ai-tool');
+    var answers = {}, qi = 0, photo = null, photoOk = false, busy = false, landmarker = null;
+    var cid = store.get('localStorage', 'cc_cid'); if (!cid) { cid = 'c_' + uid(); store.set('localStorage', 'cc_cid', cid); }
+    // La foto se ofrece solo si el servidor tiene el análisis de imagen habilitado.
+    var photoReady = DEMO ? Promise.resolve(true) : !CFG.API_URL ? Promise.resolve(false) :
+      fetch(CFG.API_URL).then(function (r) { return r.json(); }).then(function (j) { return !!j.aiReady; }).catch(function () { return false; });
+
+    function show(name) {
+      $$('[data-ai]', card).forEach(function (el) { el.hidden = el.getAttribute('data-ai') !== name; });
+      var target = $('[data-ai="' + name + '"]', card);
+      if (card.getBoundingClientRect().top < 0) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return target;
+    }
+    function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+    // 1. Introducción
+    $('#aiStart').addEventListener('click', function () {
+      if (!$('#aiAdult').checked) { status($('#aiIntroStatus'), 'Esta orientación es solo para mayores de 18 años.', 'error'); return; }
+      status($('#aiIntroStatus'), '');
+      Track.send('analisis_inicio', { dedupeKey: 'analisis_inicio:' + PAGE_LOADED_AT });
+      if (session) startQuiz(); else show('datos');
+    });
+
+    // 2. Datos de contacto
+    bindLeadForm({ form: $('#aiLead'), btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
       onSaved: function () {
-        showPhotoStep(); $('#aiPick').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        startQuiz();
         if (!store.get('sessionStorage', 'cc_booking')) prepareScheduling();
       } });
-    var fileIn = $('#aiFile'), drop = $('#aiDrop'), prev = $('#aiPreview'), prevImg = $('#aiPreviewImg');
-    var btn = $('#aiBtn'), st = $('#aiStatus'), pick = $('#aiPick'), out = $('#aiResult');
-    var photo = null, busy = false;
-    var cid = store.get('localStorage', 'cc_cid'); if (!cid) { cid = 'c_' + uid(); store.set('localStorage', 'cc_cid', cid); }
-    var FOCUS = { higiene: 'Higiene y preparación', exfoliacion_manual: 'Exfoliación manual', punta_diamante: 'Exfoliación con punta de diamante',
-      extraccion: 'Extracción de puntos negros', mascara_descongestiva: 'Máscara descongestiva', activos: 'Activos elegidos para tu piel',
-      led: 'Lámpara LED', hidratacion: 'Hidratación y protección', rutina_casa: 'Orientación para tu rutina en casa' };
 
+    // 3. Cuestionario
+    function startQuiz() { qi = 0; show('quiz'); renderQuestion(); }
+    function optionList(name, opts, multi, current) {
+      var wrap = el('div');
+      opts.forEach(function (o) {
+        var lab = el('label', 'ai-opt'), inp = document.createElement('input');
+        inp.type = multi ? 'checkbox' : 'radio'; inp.name = name; inp.value = o[0];
+        inp.checked = multi ? (current || []).indexOf(o[0]) >= 0 : current === o[0];
+        lab.appendChild(inp); lab.appendChild(document.createTextNode(o[1])); wrap.appendChild(lab);
+      });
+      return wrap;
+    }
+    function renderQuestion() {
+      var q = QUIZ[qi], box = $('#aiQ');
+      $('#aiQStep').textContent = 'Pregunta ' + (qi + 1) + ' de ' + QUIZ.length;
+      $('#aiQBar').style.width = Math.round(qi / QUIZ.length * 100) + '%';
+      box.innerHTML = ''; status($('#aiQStatus'), '');
+      box.appendChild(el('legend', null, q.q));
+      box.appendChild(optionList('q_' + q.k, q.o, q.multi, answers[q.k]));
+      if (q.follow) {
+        var f = el('div', 'ai-follow'); f.hidden = answers[q.k] !== q.follow.when;
+        f.appendChild(el('p', null, q.follow.q));
+        f.appendChild(optionList('q_' + q.follow.k, q.follow.o, false, answers[q.follow.k]));
+        box.appendChild(f);
+      }
+      box.onchange = function (e) {
+        var t = e.target;
+        if (t.name === 'q_' + q.k) {
+          if (q.multi) {
+            // "Nada en especial" y "No sé" excluyen el resto de las opciones.
+            var excl = ['nada', 'nose'];
+            $$('input[name="q_' + q.k + '"]', box).forEach(function (i) {
+              if (i === t || !t.checked) return;
+              if (excl.indexOf(t.value) >= 0 || excl.indexOf(i.value) >= 0) i.checked = false;
+            });
+            answers[q.k] = $$('input[name="q_' + q.k + '"]:checked', box).map(function (i) { return i.value; });
+          } else answers[q.k] = t.value;
+          if (q.follow) { var fb = $('.ai-follow', box); fb.hidden = answers[q.k] !== q.follow.when; if (fb.hidden) delete answers[q.follow.k]; }
+        } else if (q.follow && t.name === 'q_' + q.follow.k) answers[q.follow.k] = t.value;
+        status($('#aiQStatus'), '');
+      };
+      $('#aiQBack').textContent = qi === 0 ? 'Salir' : 'Atrás';
+      $('#aiQNext').textContent = qi === QUIZ.length - 1 ? 'Terminar' : 'Siguiente';
+      var first = $('input', box); if (first && document.activeElement && card.contains(document.activeElement)) first.focus({ preventScroll: true });
+    }
+    $('#aiQBack').addEventListener('click', function () { if (qi === 0) show('intro'); else { qi--; renderQuestion(); } });
+    $('#aiQNext').addEventListener('click', function () {
+      var q = QUIZ[qi], a = answers[q.k];
+      if (!a || (q.multi && !a.length)) { status($('#aiQStatus'), 'Elegí una opción para seguir.', 'error'); return; }
+      if (q.follow && a === q.follow.when && !answers[q.follow.k]) { status($('#aiQStatus'), 'Contanos cuáles para seguir.', 'error'); return; }
+      if (qi < QUIZ.length - 1) { qi++; renderQuestion(); return; }
+      $('#aiQBar').style.width = '100%';
+      Track.send('analisis_cuestionario_completo', { dedupeKey: 'analisis_cuestionario:' + PAGE_LOADED_AT });
+      photoReady.then(function (ok) { if (ok) openPhoto(); else submit(false); });
+    });
+
+    // 4. Foto opcional, con controles técnicos en el dispositivo
+    function openPhoto() {
+      show('foto');
+      if (!landmarker) loadLandmarker().catch(function () {}); // se precarga mientras la persona lee las indicaciones
+    }
+    function loadLandmarker() {
+      if (landmarker) return landmarker;
+      landmarker = import(MP_BASE + '/vision_bundle.mjs').then(function (v) {
+        return v.FilesetResolver.forVisionTasks(MP_BASE + '/wasm').then(function (fs) {
+          return v.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL }, runningMode: 'IMAGE', numFaces: 2 });
+        });
+      });
+      landmarker.catch(function () { landmarker = null; });
+      return landmarker;
+    }
+    ['#aiCam', '#aiFile'].forEach(function (id) {
+      $(id).addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
+    });
+    function resetPhotoUi() {
+      photo = null; photoOk = false; $('#aiPreview').hidden = true; $('#aiChecks').innerHTML = '';
+      $('#aiPhotoConsentBox').hidden = true; $('#aiSend').hidden = true; status($('#aiStatus'), '');
+    }
     function loadFile(f) {
-      status(st, '');
+      resetPhotoUi();
       if (!f) return;
-      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { status(st, 'Elegí una foto (JPG o PNG).', 'error'); return; }
-      if (f.size > 25 * 1024 * 1024) { status(st, 'La foto es muy pesada. Probá con otra.', 'error'); return; }
+      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { status($('#aiStatus'), 'Elegí una foto (JPG o PNG).', 'error'); return; }
+      if (f.size > 25 * 1024 * 1024) { status($('#aiStatus'), 'La foto es muy pesada. Probá con otra.', 'error'); return; }
       var url = URL.createObjectURL(f), img = new Image();
       img.onload = function () {
         var max = 1024, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
-        if (Math.min(w, h) < 300) { URL.revokeObjectURL(url); status(st, 'La foto tiene muy poca resolución. Probá con otra.', 'error'); return; }
         var c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
         c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // respeta la orientación EXIF y no copia metadatos
         URL.revokeObjectURL(url);
-        var dataUrl = c.toDataURL('image/jpeg', 0.85);
-        photo = dataUrl.split(',')[1];
-        prevImg.src = dataUrl; prev.hidden = false; drop.hidden = true;
+        $('#aiPreviewImg').src = c.toDataURL('image/jpeg', 0.85); $('#aiPreview').hidden = false;
+        if (Math.min(w, h) < 480) return rejectPhoto([['bad', 'La foto tiene poca resolución. Probá con la cámara del teléfono.']]);
+        checkPhoto(c);
       };
-      img.onerror = function () { URL.revokeObjectURL(url); status(st, 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
+      img.onerror = function () { URL.revokeObjectURL(url); status($('#aiStatus'), 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
       img.src = url;
     }
-    fileIn.addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
-    ['dragover', 'dragenter'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('is-over'); }); });
-    ['dragleave', 'drop'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('is-over'); }); });
-    drop.addEventListener('drop', function (e) { loadFile(e.dataTransfer.files && e.dataTransfer.files[0]); });
-    $('#aiChange').addEventListener('click', function () { fileIn.click(); });
+    function renderChecks(list) {
+      var ul = $('#aiChecks'); ul.innerHTML = '';
+      list.forEach(function (c) { ul.appendChild(el('li', 'is-' + c[0], c[1])); });
+    }
+    function rejectPhoto(list) {
+      renderChecks(list);
+      status($('#aiStatus'), 'Esta foto no sirve para la orientación. Sacá otra siguiendo las indicaciones, o seguí sin foto.', 'error');
+      Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
+    }
+    function checkPhoto(canvas) {
+      renderChecks([['info', 'Revisando la foto…']]);
+      Promise.resolve(loadLandmarker()).then(function (lm) {
+        var res = lm.detect(canvas);
+        var list = evaluatePhoto(canvas, res && res.faceLandmarks || []);
+        if (list.some(function (c) { return c[0] === 'bad'; })) return rejectPhoto(list);
+        renderChecks(list);
+        photo = canvas.toDataURL('image/jpeg', 0.85).split(',')[1]; photoOk = true;
+        $('#aiPhotoConsentBox').hidden = false; $('#aiSend').hidden = false; status($('#aiStatus'), '');
+        Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
+      }).catch(function () {
+        renderChecks([['warn', 'No pudimos revisar la foto en este dispositivo.']]);
+        status($('#aiStatus'), 'Sin poder revisar la foto no la usamos. Podés seguir sin foto.', 'error');
+      });
+    }
+    function evaluatePhoto(canvas, faces) {
+      if (!faces.length) return [['bad', 'No encontramos un rostro. Ponete de frente y que se vea toda tu cara.']];
+      if (faces.length > 1) return [['bad', 'Se ve más de una persona. Tiene que aparecer solo tu cara.']];
+      var P = faces[0], W = canvas.width, H = canvas.height, out = [];
+      var xs = P.map(function (p) { return p.x; }), ys = P.map(function (p) { return p.y; });
+      var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+      if (minX < 0 || minY < 0 || maxX > 1 || maxY > 1) out.push(['bad', 'Tu cara quedó cortada. Alejá un poco la cámara.']);
+      else if (maxX - minX < PHOTO_RULES.minFaceWidth) out.push(['bad', 'Tu cara se ve muy chica. Acercá la cámara.']);
+      else out.push(['ok', 'Un solo rostro, bien encuadrado.']);
+      // Orientación: nariz centrada entre los bordes del rostro (giro) y ojos nivelados (inclinación).
+      var nose = P[1], l = P[234], r = P[454], eL = P[33], eR = P[263];
+      var dl = Math.abs(nose.x - l.x), dr = Math.abs(r.x - nose.x), roll = Math.abs(Math.atan2((eR.y - eL.y) * H, (eR.x - eL.x) * W) * 180 / Math.PI);
+      if (Math.min(dl, dr) / Math.max(dl, dr) < PHOTO_RULES.minYawBalance) out.push(['bad', 'Tu cara está girada. Mirá de frente a la cámara.']);
+      else if (roll > PHOTO_RULES.maxRollDeg) out.push(['bad', 'La cabeza está inclinada. Mantenela derecha.']);
+      else out.push(['ok', 'Mirada de frente.']);
+      // Nitidez y exposición sobre el recorte del rostro.
+      var bx = Math.max(0, minX * W), by = Math.max(0, minY * H), bw = Math.min(W, maxX * W) - bx, bh = Math.min(H, maxY * H) - by;
+      var g = grayCrop(canvas, bx, by, bw, bh, 256);
+      var q = imageStats(g);
+      if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto está movida o desenfocada. Sostené el teléfono quieto.']);
+      else out.push(['ok', 'Foto nítida.']);
+      if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos en la cara. Buscá una luz más suave.']);
+      else if (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) out.push(['bad', 'La foto está muy oscura. Buscá más luz, de frente.']);
+      else out.push(['ok', 'Luz suficiente.']);
+      // Luz despareja entre mejillas: aviso, no bloquea.
+      var s = (maxX - minX) * W * 0.12;
+      var mL = meanLum(canvas, P[50].x * W - s / 2, P[50].y * H - s / 2, s), mR = meanLum(canvas, P[280].x * W - s / 2, P[280].y * H - s / 2, s);
+      if (Math.max(mL, mR) / Math.max(1, Math.min(mL, mR)) > PHOTO_RULES.maxCheekRatio) out.push(['warn', 'La luz llega más de un lado. Si podés, ponete de frente a la ventana.']);
+      out.push(['info', 'No podemos detectar maquillaje ni filtros: si usaste alguno, mejor sacá otra.']);
+      return out;
+    }
+    function grayCrop(canvas, x, y, w, h, size) {
+      var k = size / Math.max(1, w), c = document.createElement('canvas');
+      c.width = size; c.height = Math.max(1, Math.round(h * k));
+      c.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, c.width, c.height);
+      var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, g = new Float32Array(c.width * c.height);
+      for (var i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      return { g: g, w: c.width, h: c.height };
+    }
+    function imageStats(im) {
+      var g = im.g, w = im.w, h = im.h, n = g.length, hi = 0, lo = 0, hist = new Uint32Array(256), sum = 0, sum2 = 0, m = 0;
+      for (var i = 0; i < n; i++) { var v = g[i] | 0; hist[v]++; if (v >= 250) hi++; if (v <= 15) lo++; }
+      for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+        var p = y * w + x, lap = g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p];
+        sum += lap; sum2 += lap * lap; m++;
+      }
+      var pct = function (t) { var acc = 0; for (var k = 0; k < 256; k++) { acc += hist[k]; if (acc >= n * t) return k; } return 255; };
+      return { clipHigh: hi / n, clipLow: lo / n, contrast: pct(0.95) - pct(0.05), sharpness: m ? (sum2 / m - Math.pow(sum / m, 2)) : 0 };
+    }
+    function meanLum(canvas, x, y, s) {
+      var im = grayCrop(canvas, Math.max(0, x), Math.max(0, y), Math.max(1, s), Math.max(1, s), 24), t = 0;
+      for (var i = 0; i < im.g.length; i++) t += im.g[i];
+      return t / im.g.length;
+    }
+    $('#aiSend').addEventListener('click', function () {
+      if (!photoOk) return;
+      if (!$('#aiPhotoConsent').checked) { status($('#aiStatus'), 'Para usar la foto, marcá que aceptás enviarla al servicio de IA. O seguí sin foto.', 'error'); return; }
+      submit(true);
+    });
+    $('#aiSkip').addEventListener('click', function () { submit(false); });
 
-    function reset() {
-      photo = null; prevImg.removeAttribute('src'); prev.hidden = true; drop.hidden = false;
-      out.hidden = true; out.innerHTML = ''; pick.hidden = false; status(st, '');
+    // Envío: el servidor aplica las reglas (y la IA, si hay foto) y guarda solo el resultado.
+    function submit(withPhoto) {
+      if (busy) return;
+      var btn = withPhoto ? $('#aiSend') : $('#aiSkip');
+      busy = true; setBusy(btn, true, 'Preparando tu orientación…');
+      if (withPhoto) status($('#aiStatus'), 'Puede demorar unos segundos.');
+      var body = { requestId: session && session.requestId, token: session && session.token, adult: true, answers: answers, clientId: cid };
+      if (withPhoto) { body.image = photo; body.mediaType = 'image/jpeg'; body.photoConsent = true; var ts = $('input[name="cf-turnstile-response"]'); body.turnstileToken = ts ? ts.value : ''; }
+      api('analyze', body, 60000).then(function (r) {
+        busy = false; setBusy(btn, false);
+        if (r.ok && r.status === 'retry') {
+          show('foto'); resetPhotoUi(); status($('#aiStatus'), (r.retry_reason || 'La foto no sirvió.') + ' Sacá otra o seguí sin foto.', 'error');
+          Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() }); return;
+        }
+        if (r.ok && r.status === 'not_allowed') { show('foto'); resetPhotoUi(); status($('#aiStatus'), 'La foto tiene que ser de tu propia cara y solo para mayores de 18 años.', 'error'); return; }
+        if (r.code === 'invalid_token') {
+          store.del('sessionStorage', 'cc_lead'); session = null; show('datos');
+          status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos.', 'error'); return;
+        }
+        if (!r.ok) { status(withPhoto ? $('#aiStatus') : $('#aiQStatus'), 'No pudimos preparar tu orientación. Probá de nuevo en un momento.', 'error'); return; }
+        photo = null; // no se conserva en memoria
+        renderResult(r);
+        Track.send('analisis_resultado', { dedupeKey: 'analisis_resultado:' + PAGE_LOADED_AT });
+      });
     }
 
-    btn.addEventListener('click', function () {
-      if (busy) return;
-      if (!photo) { status(st, 'Primero sacá o subí una foto.', 'error'); return; }
-      if (!$('#aiAdult').checked || !$('#aiConsent').checked) { status(st, 'Marcá las dos casillas para continuar.', 'error'); return; }
-      busy = true; setBusy(btn, true, 'Analizando tu foto…'); status(st, 'Puede demorar unos segundos.');
-      var tsInput = $('input[name="cf-turnstile-response"]');
-      api('analyze', { image: photo, mediaType: 'image/jpeg', consent: true, adult: true, clientId: cid, requestId: session && session.requestId, token: session && session.token, turnstileToken: tsInput ? tsInput.value : '' }, 60000)
-        .then(function (r) {
-          busy = false; setBusy(btn, false);
-          if (r.ok && r.status === 'ok') { photo = null; Track.send('analisis_piel', { dedupeKey: 'analisis_piel:' + PAGE_LOADED_AT }); return render(r); }
-          if (r.ok && r.status === 'retry') { status(st, (r.retry_reason || 'Probá con otra foto.') + ' Elegí otra foto y volvé a intentar.', 'error'); return; }
-          if (r.ok && r.status === 'not_allowed') { reset(); status(st, 'Este análisis es solo para mayores de 18 años, con una foto de tu propia cara.', 'error'); return; }
-          if (r.code === 'invalid_token') {
-            store.del('sessionStorage', 'cc_lead'); session = null; aiLead.hidden = false; pick.hidden = true;
-            status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos para analizar la foto.', 'error'); return;
-          }
-          var msgs = {
-            rate_limited: 'Llegaste al máximo de análisis por ahora. Probá más tarde o reservá tu evaluación con la profesional.',
-            ai_not_configured: 'El análisis todavía no está disponible. Podés reservar tu sesión igual.',
-            invalid_image: 'No pudimos procesar esa foto. Probá con otra.',
-            consent_required: 'Marcá las dos casillas para continuar.'
-          };
-          status(st, msgs[r.code] || 'No pudimos analizar la foto. Probá de nuevo en un momento.', 'error');
-        });
-    });
-
-    function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-    function render(r) {
-      out.innerHTML = '';
-      if (r.example) out.appendChild(el('p', 'ai-example', 'Resultado de ejemplo (vista previa): tu foto no fue analizada.'));
+    // 5. Resultado: cada conclusión muestra su origen
+    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto (IA)': 'Foto · IA', 'evaluación presencial': 'En la consulta' };
+    function origin(o) { var s = el('span', 'ai-origin' + (o === 'foto (IA)' ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); return s; }
+    function block(title, items, cls) {
+      var b = el('div', 'ai-block' + (cls ? ' ' + cls : '')); b.appendChild(el('h4', null, title));
+      var ul = el('ul', 'ai-focus');
+      items.forEach(function (i) { var li = el('li', null, i.text + ' '); li.appendChild(origin(i.origin)); ul.appendChild(li); });
+      b.appendChild(ul); return b;
+    }
+    function renderResult(r) {
+      var out = $('#aiResult'); out.innerHTML = '';
+      if (r.example) out.appendChild(el('p', 'ai-example', 'Resultado de ejemplo (vista previa): no se analizó nada.'));
+      // A. Perfil referido
       var head = el('div', 'ai-result-head'), h = el('h3');
-      if (r.skin_type && r.skin_type !== 'indeterminado') { h.appendChild(document.createTextNode('Tu piel parece ')); h.appendChild(el('strong', null, r.skin_type)); }
-      else h.textContent = 'No pudimos estimar tu tipo de piel con esta foto';
-      head.appendChild(h); head.appendChild(el('span', 'chip', 'Confianza ' + (r.skin_type_confidence || 'baja') + ' · lo confirma la profesional'));
-      out.appendChild(head);
-      if (r.summary) out.appendChild(el('p', null, r.summary));
-      if (r.observations && r.observations.length) {
-        var b = el('div', 'ai-block'); b.appendChild(el('h4', null, 'Lo que se observa en la foto')); var ul = el('ul', 'ai-obs');
-        r.observations.forEach(function (o) { var li = el('li'); if (o.area) { li.appendChild(el('strong', null, o.area + ': ')); } li.appendChild(document.createTextNode(o.text)); ul.appendChild(li); });
-        b.appendChild(ul); out.appendChild(b);
+      if (r.profile.type !== 'Indeterminada') { h.appendChild(document.createTextNode('Tu piel parece ')); h.appendChild(el('strong', null, r.profile.type.toLowerCase())); }
+      else h.textContent = 'Tipo de piel por definir en la consulta';
+      head.appendChild(h); head.appendChild(origin(r.profile.origin)); out.appendChild(head);
+      if (r.profile.warning) out.appendChild(el('p', 'ai-warn', r.profile.warning));
+      // B. Necesidades referidas
+      if (r.needs.length) out.appendChild(block('Lo que contaste de tu piel', r.needs));
+      // C. Observaciones de la foto
+      var c = el('div', 'ai-block'); c.appendChild(el('h4', null, 'Lo que se ve en tu foto'));
+      if (r.photo === 'analizada' && r.observations.length) {
+        var ul = el('ul', 'ai-obs'); r.observations.forEach(function (o) { var li = el('li', null, o.text + ' '); li.appendChild(origin(o.origin)); ul.appendChild(li); });
+        c.appendChild(ul);
+        if (r.photoLimits) c.appendChild(el('p', 'ai-note', r.photoLimits));
+      } else {
+        c.appendChild(el('p', 'ai-note', r.photo === 'analizada' ? 'La IA no identificó características claras en la foto.' :
+          r.photo === 'no_disponible' ? 'No pudimos analizar la foto: la orientación sale de tus respuestas.' : 'No sumaste foto: la orientación sale de tus respuestas.'));
       }
-      if (r.session_focus && r.session_focus.length) {
-        var b2 = el('div', 'ai-block'); b2.appendChild(el('h4', null, 'En tu limpieza facial se podría trabajar')); var ul2 = el('ul', 'ai-focus');
-        r.session_focus.forEach(function (k) { if (FOCUS[k]) ul2.appendChild(el('li', null, FOCUS[k])); });
-        b2.appendChild(ul2); b2.appendChild(el('p', 'fine', 'La Lic. Jaqueline Mansilla define las técnicas en la evaluación inicial.')); out.appendChild(b2);
+      out.appendChild(c);
+      // D. Qué podría aportar una limpieza facial
+      var d = block('Qué podría aportarte una limpieza facial', r.benefits);
+      r.limits.forEach(function (l) { d.appendChild(el('p', 'ai-note', l.text)); });
+      out.appendChild(d);
+      if (r.toEvaluate.length) out.appendChild(block('Para ver con la profesional en la consulta', r.toEvaluate, 'ai-eval'));
+      if (r.tips.length) {
+        var t = el('div', 'ai-block'); t.appendChild(el('h4', null, 'Cuidados básicos'));
+        var ul3 = el('ul', 'ai-tipsout'); r.tips.forEach(function (x) { ul3.appendChild(el('li', null, x.text)); }); t.appendChild(ul3); out.appendChild(t);
       }
-      if (r.home_tips && r.home_tips.length) {
-        var b3 = el('div', 'ai-block'); b3.appendChild(el('h4', null, 'Para tu día a día')); var ul3 = el('ul', 'ai-tipsout');
-        r.home_tips.forEach(function (t) { ul3.appendChild(el('li', null, t)); }); b3.appendChild(ul3); out.appendChild(b3);
-      }
-      if (r.see_doctor) out.appendChild(el('p', 'ai-doctor', r.see_doctor_reason || 'Conviene que consultes a un médico antes de un tratamiento estético.'));
+      out.appendChild(el('p', 'ai-disclaimer', 'Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.'));
+      // F. Próximo paso
       var acts = el('div', 'ai-actions');
-      var cta = el('a', 'btn', 'Reservá tu limpieza facial'); cta.href = '#reservar';
-      var again = el('button', 'btn btn-ghost', 'Analizar otra foto'); again.type = 'button'; again.addEventListener('click', reset);
+      var cta = el('a', 'btn', 'Reservá tu sesión'); cta.href = '#reservar';
+      cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
+      var again = el('button', 'btn btn-ghost', 'Volver a empezar'); again.type = 'button';
+      again.addEventListener('click', function () { answers = {}; resetPhotoUi(); $('#aiPhotoConsent').checked = false; startQuiz(); });
       acts.appendChild(cta); acts.appendChild(again); out.appendChild(acts);
-      pick.hidden = true; out.hidden = false; out.focus({ preventScroll: true });
+      show('resultado'); out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  }
+  })();
 
   // ── Videos: los clips cortos se reproducen sin sonido solo mientras están en pantalla ──
   (function videos() {

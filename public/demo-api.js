@@ -55,13 +55,22 @@
       }
       if (b.action === 'track') return delay({ ok: true }, 50);
       if (b.action === 'analyze') {
-        // Vista previa: NO se analiza la foto. Se devuelve un ejemplo fijo, marcado como tal.
-        return delay({ ok: true, example: true, status: 'ok', skin_type: 'mixta', skin_type_confidence: 'media',
-          summary: 'Se observa más brillo en la zona T (frente, nariz y mentón) y las mejillas con un aspecto más seco.',
-          observations: [{ area: 'Zona T', text: 'Brillo y poros visibles en nariz y frente.' }, { area: 'Nariz', text: 'Puntos negros aparentes en los laterales.' }, { area: 'Mejillas', text: 'Textura algo irregular y menos luminosidad.' }],
-          session_focus: ['extraccion', 'punta_diamante', 'hidratacion'],
-          home_tips: ['Limpieza suave por la mañana y por la noche.', 'Hidratante liviano, más en mejillas que en la zona T.', 'Protector solar todos los días.'],
-          see_doctor: false }, 2200);
+        // Vista previa: NO se analiza nada. Se devuelve un ejemplo fijo, marcado como tal.
+        if (q.get('retry') === '1' && b.image) return delay({ ok: true, status: 'retry', retry_reason: 'La foto está oscura; probá con luz pareja de frente.' }, 1200);
+        var Q = 'cuestionario', F = 'foto (IA)', V = 'evaluación presencial', photo = b.image ? 'analizada' : 'sin_foto';
+        return delay({ ok: true, status: 'ok', example: true, rulesVersion: 'v1-2026-11', photo: photo, photoLimits: b.image ? 'La luz cálida puede alterar el tono.' : '',
+          profile: { type: 'Mixta', warning: '', origin: Q, rule: 'TIPO-04' },
+          needs: [{ text: 'Posible sensibilidad: a veces tu piel reacciona con algunos productos.', origin: Q, rule: 'NEC-SENS-2' },
+                  { text: 'Posible falta de hidratación: contaste tirantez después de lavarte. No es una medición; lo confirma la profesional.', origin: Q, rule: 'NEC-HID-1' }],
+          observations: b.image ? [{ text: 'Zona T: Se observa brillo en frente y nariz.', origin: F, rule: 'OBS-brillo_zona_t' },
+                                   { text: 'Nariz: Parecen verse puntos negros en los laterales.', origin: F, rule: 'OBS-puntos_negros_aparentes' }] : [],
+          benefits: [{ text: 'Despejar los puntos negros que la profesional considere aptos para extracción.', origin: b.image ? F : Q, rule: 'BEN-PN' },
+                     { text: 'Sensación de piel más limpia y con menos brillo después de la sesión. El brillo vuelve con los días.', origin: b.image ? F : Q, rule: 'BEN-BRI' },
+                     { text: 'Piel más suave al tacto.', origin: Q, rule: 'BEN-TEX' }],
+          limits: [{ text: 'Una sesión no cierra poros de forma permanente, no borra marcas ni resuelve imperfecciones de fondo. El resultado depende de tu piel y de lo que defina la profesional.', origin: V, rule: 'LIM-1' }],
+          toEvaluate: [{ text: 'Usás exfoliantes o retinoides: la profesional lo tiene en cuenta para decidir qué se puede hacer en esta sesión.', origin: Q, rule: 'EVA-EXF' }],
+          tips: [{ text: 'Lavá tu cara con suavidad, a la mañana y a la noche.', origin: Q, rule: 'TIP-1' }, { text: 'Usá protector solar todos los días.', origin: Q, rule: 'TIP-2' },
+                 { text: 'Probá un producto nuevo por vez.', origin: Q, rule: 'TIP-SENS' }] }, b.image ? 2200 : 900);
       }
       if (b.action === 'book') {
         if (conflictOnce) {

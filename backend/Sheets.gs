@@ -26,8 +26,10 @@ var RECON_HEADERS = ['Fecha', 'ID solicitud', 'ID reserva', 'Problema', 'Datos p
 var HOURS_HEADERS = ['Día', 'Desde', 'Hasta', 'Activo', 'Nota'];
 var CLOSED_HEADERS = ['Fecha (AAAA-MM-DD)', 'Motivo'];
 var CONFIG_HEADERS = ['Parámetro', 'Valor', 'Nota', 'Clave (no modificar)'];
-var ANALYSIS_HEADERS = ['ID análisis', 'Fecha', 'ID solicitud', 'Nombre', 'Apellido', 'Celular', 'Email', 'Tipo de piel',
-                        'Observaciones', 'Foco sugerido para la sesión', 'Cuidados en casa', 'Reservó', 'Entorno'];
+var ANALYSIS_HEADERS = ['ID análisis', 'Fecha', 'ID solicitud', 'Nombre', 'Apellido', 'Celular', 'Email',
+                        'Tipo de piel (orientativo)', 'Necesidades referidas', 'Observaciones de la foto (IA)',
+                        'Beneficios posibles', 'Para evaluar en consulta', 'Cuidados básicos', 'Foto', 'Versión de reglas',
+                        'Reservó', 'Entorno'];
 var DAY_NAMES_ = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 
 var STATUS = {
@@ -302,13 +304,17 @@ function hasPriorBooking_(cfg, requestId, email, phone) {
   });
 }
 
-/** Guarda el resultado del análisis de piel (nunca la foto) junto a los datos de la solicitud. */
+/**
+ * Guarda el resultado de la orientación (nunca la foto ni las respuestas del cuestionario).
+ * Cada conclusión queda con su origen y la regla que la produjo: "texto [origen · regla]".
+ */
 function appendAnalysis_(cfg, contact, result) {
   var sh = openSS_(cfg).getSheetByName(TAB_ANALYSIS);
   var idx = headerIndex_(sh);
   var row = new Array(Object.keys(idx).length).fill('');
   var set = function (k, v) { if (k in idx) row[idx[k]] = sheetSafe_(v); };
   var clean = function (v) { return String(v == null ? '' : v).replace(/^'/, ''); };
+  var list = function (items) { return (items || []).map(function (i) { return i.text + ' [' + i.origin + ' · ' + i.rule + ']'; }).join(' | '); };
   var id = 'AP-' + Utilities.getUuid().replace(/-/g, '').slice(0, 10).toUpperCase();
   set('ID análisis', id);
   set('Fecha', nowLocal_(cfg));
@@ -317,10 +323,15 @@ function appendAnalysis_(cfg, contact, result) {
   set('Apellido', clean(contact['Apellido']));
   set('Celular', clean(contact['Celular']));
   set('Email', clean(contact['Email']));
-  set('Tipo de piel', result.skin_type + (result.skin_type_confidence ? ' (confianza ' + result.skin_type_confidence + ')' : ''));
-  set('Observaciones', [result.summary].concat((result.observations || []).map(function (o) { return o.area + ': ' + o.text; })).filter(Boolean).join(' · '));
-  set('Foco sugerido para la sesión', (result.session_focus || []).join(', '));
-  set('Cuidados en casa', (result.home_tips || []).join(' · '));
+  var p = result.profile;
+  set('Tipo de piel (orientativo)', p.type + (p.warning ? ' (con aviso)' : '') + ' [' + p.origin + ' · ' + p.rule + ']');
+  set('Necesidades referidas', list(result.needs));
+  set('Observaciones de la foto (IA)', list(result.observations));
+  set('Beneficios posibles', list(result.benefits));
+  set('Para evaluar en consulta', list(result.toEvaluate));
+  set('Cuidados básicos', list(result.tips));
+  set('Foto', { analizada: 'Analizada por IA (no guardada)', sin_foto: 'Sin foto', no_disponible: 'Enviada, no se pudo analizar (no guardada)' }[result.photo] || '');
+  set('Versión de reglas', result.rulesVersion);
   set('Reservó', 'No');
   set('Entorno', cfg.ENV);
   sh.appendRow(row);

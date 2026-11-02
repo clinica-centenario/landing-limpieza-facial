@@ -143,19 +143,33 @@
     <section class="section section-panel" id="analisis" aria-labelledby="ia-t" hidden>
       <div class="container ai-grid">
         <div class="ai-copy">
-          <p class="eyebrow">Análisis de piel con IA</p>
-          <h2 id="ia-t">Conocé tu tipo de piel en un minuto</h2>
-          <p>Subí una foto de tu cara y te devolvemos una orientación sobre tu tipo de piel y lo que se ve en la foto. Es una guía para empezar: la evaluación real la hace la profesional en la sesión.</p>
+          <p class="eyebrow">Orientación para tu piel</p>
+          <h2 id="ia-t">¿Qué podría necesitar tu piel?</h2>
+          <p>Orientación cosmética basada en tus respuestas y, cuando sea posible, en características visibles de tu foto. La profesional confirmará las necesidades de tu piel en consulta.</p>
           <ul class="checks ai-tips">
-            <li>De frente y con luz natural.</li>
-            <li>Sin maquillaje ni filtros.</li>
-            <li>Solo tu cara, sin otras personas.</li>
+            <li>9 preguntas cortas, unos 2 minutos.</li>
+            <li>La foto es opcional: podés hacerlo sin foto.</li>
+            <li>Tu foto no se guarda.</li>
           </ul>
+          <p class="ai-disclaimer">Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.</p>
         </div>
 
         <div class="card ai-tool" aria-live="polite">
-          <form id="aiLead" novalidate>
-            <p class="ai-step">Paso 1 de 2 · Tus datos</p>
+          <!-- 1. Introducción -->
+          <div data-ai="intro">
+            <p class="ai-step">Antes de empezar</p>
+            <p>Vas a recibir un tipo de piel orientativo, lo que podría aportarte una limpieza facial y cuidados básicos. No es un diagnóstico.</p>
+            <div class="field check">
+              <input id="aiAdult" type="checkbox">
+              <label for="aiAdult">Tengo 18 años o más.</label>
+            </div>
+            <button type="button" class="btn btn-block" id="aiStart">Empezar</button>
+            <p class="form-status" id="aiIntroStatus" role="status"></p>
+          </div>
+
+          <!-- 2. Datos de contacto (la misma solicitud sirve para reservar) -->
+          <form id="aiLead" data-ai="datos" novalidate hidden>
+            <p class="ai-step">Tus datos</p>
             <div class="field-row">
               <div class="field">
                 <label for="a-firstName">Nombre</label>
@@ -190,31 +204,50 @@
             <button class="btn btn-block" type="submit" id="aiLeadBtn">Continuar</button>
             <p class="form-status" id="aiLeadStatus" role="status"></p>
           </form>
-          <div id="aiPick" hidden>
-            <p class="ai-step">Paso 2 de 2 · Tu foto</p>
-            <label class="ai-drop" for="aiFile" id="aiDrop">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.4-2h4.6l1.4 2h1.8A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.6"/></svg>
-              <span class="ai-drop-title">Sacá o subí una foto</span>
-              <span class="ai-drop-sub">JPG o PNG · tu cara de frente</span>
-            </label>
-            <input id="aiFile" type="file" accept="image/*" class="visually-hidden">
+
+          <!-- 3. Cuestionario -->
+          <div data-ai="quiz" hidden>
+            <p class="ai-step" id="aiQStep"></p>
+            <div class="ai-progress" aria-hidden="true"><span id="aiQBar"></span></div>
+            <fieldset class="ai-q" id="aiQ"></fieldset>
+            <div class="ai-qnav">
+              <button type="button" class="btn btn-ghost" id="aiQBack">Atrás</button>
+              <button type="button" class="btn" id="aiQNext">Siguiente</button>
+            </div>
+            <p class="form-status" id="aiQStatus" role="status"></p>
+          </div>
+
+          <!-- 4. Foto opcional -->
+          <div data-ai="foto" hidden>
+            <p class="ai-step">Foto (opcional)</p>
+            <ul class="ai-photo-tips">
+              <li>Luz pareja, de frente (por ejemplo, mirando a una ventana).</li>
+              <li>Sin filtros ni modo belleza, y sin maquillaje si es posible.</li>
+              <li>Rostro despejado: sin anteojos, flequillo ni manos delante.</li>
+              <li>Cámara a la altura de los ojos, solo tu cara.</li>
+            </ul>
+            <div class="ai-pick" id="aiPickBtns">
+              <label class="btn" for="aiCam">Sacar foto</label>
+              <input id="aiCam" type="file" accept="image/*" capture="user" class="visually-hidden">
+              <label class="btn btn-ghost" for="aiFile">Subir una foto</label>
+              <input id="aiFile" type="file" accept="image/*" class="visually-hidden">
+            </div>
             <div class="ai-preview" id="aiPreview" hidden>
               <img id="aiPreviewImg" alt="Vista previa de tu foto">
-              <button type="button" class="btn btn-ghost btn-sm" id="aiChange">Cambiar foto</button>
+              <ul class="ai-checks" id="aiChecks" aria-live="polite"></ul>
             </div>
-            <div class="field check">
-              <input id="aiAdult" type="checkbox">
-              <label for="aiAdult">Tengo 18 años o más.</label>
+            <div class="field check" id="aiPhotoConsentBox" hidden>
+              <input id="aiPhotoConsent" type="checkbox">
+              <label for="aiPhotoConsent">Acepto que esta foto se envíe a un servicio de inteligencia artificial (Anthropic) solo para darme esta orientación. La clínica no la guarda.</label>
             </div>
-            <div class="field check">
-              <input id="aiConsent" type="checkbox">
-              <label for="aiConsent">Acepto que esta foto se analice con inteligencia artificial solo para darme esta orientación. La clínica no la guarda.</label>
-            </div>
-            <button type="button" class="btn btn-block" id="aiBtn">Analizar mi piel</button>
+            <button type="button" class="btn btn-block" id="aiSend" hidden>Ver mi orientación con la foto</button>
             <p class="form-status" id="aiStatus" role="status"></p>
+            <button type="button" class="link-btn" id="aiSkip">Seguir sin foto</button>
           </div>
-          <div id="aiResult" hidden tabindex="-1"></div>
-          <p class="fine">No es un diagnóstico médico. Si tenés lesiones, dolor o cambios en lunares o manchas, consultá a un médico.</p>
+
+          <!-- 5. Resultado -->
+          <div data-ai="resultado" id="aiResult" hidden tabindex="-1"></div>
+          <p class="fine">No es un diagnóstico. La profesional confirma las necesidades de tu piel en la consulta.</p>
         </div>
       </div>
     </section>
