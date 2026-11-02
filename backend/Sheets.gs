@@ -27,9 +27,9 @@ var HOURS_HEADERS = ['Día', 'Desde', 'Hasta', 'Activo', 'Nota'];
 var CLOSED_HEADERS = ['Fecha (AAAA-MM-DD)', 'Motivo'];
 var CONFIG_HEADERS = ['Parámetro', 'Valor', 'Nota', 'Clave (no modificar)'];
 var ANALYSIS_HEADERS = ['ID análisis', 'Fecha', 'ID solicitud', 'Nombre', 'Apellido', 'Celular', 'Email',
-                        'Tipo de piel (orientativo)', 'Necesidades referidas', 'Observaciones de la foto (IA)',
+                        'Tipo de piel (orientativo)', 'Necesidades referidas', 'Observaciones de la foto',
                         'Beneficios posibles', 'Para evaluar en consulta', 'Cuidados básicos', 'Foto', 'Versión de reglas',
-                        'Reservó', 'Entorno'];
+                        'Reservó', 'Entorno', 'Mediciones de la foto'];
 var DAY_NAMES_ = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 
 var STATUS = {
@@ -326,11 +326,12 @@ function appendAnalysis_(cfg, contact, result) {
   var p = result.profile;
   set('Tipo de piel (orientativo)', p.type + (p.warning ? ' (con aviso)' : '') + ' [' + p.origin + ' · ' + p.rule + ']');
   set('Necesidades referidas', list(result.needs));
-  set('Observaciones de la foto (IA)', list(result.observations));
+  set('Observaciones de la foto', list(result.observations));
   set('Beneficios posibles', list(result.benefits));
   set('Para evaluar en consulta', list(result.toEvaluate));
   set('Cuidados básicos', list(result.tips));
-  set('Foto', { analizada: 'Analizada por IA (no guardada)', sin_foto: 'Sin foto', no_disponible: 'Enviada, no se pudo analizar (no guardada)' }[result.photo] || '');
+  set('Foto', result.photo === 'analizada' ? 'Medida en el teléfono (no enviada ni guardada)' : 'Sin foto');
+  if (result.photoMetrics) set('Mediciones de la foto', JSON.stringify(result.photoMetrics));
   set('Versión de reglas', result.rulesVersion);
   set('Reservó', 'No');
   set('Entorno', cfg.ENV);

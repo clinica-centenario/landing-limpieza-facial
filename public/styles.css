@@ -353,3 +353,5 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .ai-eval { margin-top: 16px; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--green-50); border: 1px solid var(--green-100); }
 .ai-eval h4 { margin-top: 0; }
 .ai-note { font-size: 14px; color: var(--muted); margin: 0; }
+[data-ai="foto"] > .ai-note { margin-top: 10px; text-align: center; }
+.ai-diag { margin: 0 0 12px; padding: 10px; border-radius: var(--radius-sm); background: #1f2418; color: #d9e4c4; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }

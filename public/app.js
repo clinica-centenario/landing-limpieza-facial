@@ -478,8 +478,10 @@
 
   // ── Orientación de la piel (cuestionario + foto opcional) ─
   // Recorrido: introducción → datos → cuestionario → foto (opcional) → resultado.
-  // El tipo de piel sale de las respuestas; la foto, si la hay, la describe una IA (no validada para piel).
-  // La foto se controla en el dispositivo (MediaPipe), se reduce y re-codifica sin metadatos, y no se guarda.
+  // El tipo de piel sale de las respuestas. La foto se analiza SOLO en el teléfono: MediaPipe Face Landmarker
+  // (el mismo modelo Apache-2.0 que incluye UniFace) ubica el rostro y sus zonas, y se miden brillo, textura,
+  // tono y enrojecimiento relativo con reglas simples. La foto nunca se envía ni se guarda: al servidor llegan
+  // solo las categorías encontradas y los números medidos (para calibrar).
   // Analítica: solo hitos del recorrido, nunca respuestas, perfiles ni hallazgos.
   var QUIZ = [
     { k: 'brillo', q: 'A media tarde, ¿cómo está tu piel?', o: [['toda', 'Con brillo en toda la cara'], ['zona_t', 'Con brillo solo en frente, nariz y mentón'], ['no', 'Sin brillo notable'], ['nose', 'No sé']] },
@@ -500,6 +502,10 @@
   // para no penalizar pieles oscuras. Maquillaje, filtros y modo belleza NO se detectan: se pide a la persona.
   var PHOTO_RULES = { minFaceWidth: 0.28, minYawBalance: 0.55, maxRollDeg: 12, minSharpness: 45,
     maxClipHigh: 0.12, maxClipLow: 0.30, minContrast: 30, maxCheekRatio: 1.7 };
+  // Indicadores de piel medidos en la foto. Umbrales PROVISORIOS: se calibran con las pruebas en teléfonos
+  // (modo ?diagnostico=1 muestra los números). Son mediciones de imagen, no un modelo validado de piel.
+  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, rednessDiff: 0.035, texture: 7, toneCv: 0.07 };
+  var DIAG = params.get('diagnostico') === '1';
   var MP_VER = '0.10.14';
   var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + MP_VER;
   var MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -508,11 +514,7 @@
     if (!CFG.AI_ANALYSIS_ENABLED) return;
     $('#analisis').hidden = false; $('#aiHeroLink').hidden = false;
     var card = $('#analisis .ai-tool');
-    var answers = {}, qi = 0, photo = null, photoOk = false, busy = false, landmarker = null;
-    var cid = store.get('localStorage', 'cc_cid'); if (!cid) { cid = 'c_' + uid(); store.set('localStorage', 'cc_cid', cid); }
-    // La foto se ofrece solo si el servidor tiene el análisis de imagen habilitado.
-    var photoReady = DEMO ? Promise.resolve(true) : !CFG.API_URL ? Promise.resolve(false) :
-      fetch(CFG.API_URL).then(function (r) { return r.json(); }).then(function (j) { return !!j.aiReady; }).catch(function () { return false; });
+    var answers = {}, qi = 0, measured = null, busy = false, landmarker = null;
 
     function show(name) {
       $$('[data-ai]', card).forEach(function (el) { el.hidden = el.getAttribute('data-ai') !== name; });
@@ -590,7 +592,7 @@
       if (qi < QUIZ.length - 1) { qi++; renderQuestion(); return; }
       $('#aiQBar').style.width = '100%';
       Track.send('analisis_cuestionario_completo', { dedupeKey: 'analisis_cuestionario:' + PAGE_LOADED_AT });
-      photoReady.then(function (ok) { if (ok) openPhoto(); else submit(false); });
+      openPhoto();
     });
 
     // 4. Foto opcional, con controles técnicos en el dispositivo
@@ -612,8 +614,8 @@
       $(id).addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
     });
     function resetPhotoUi() {
-      photo = null; photoOk = false; $('#aiPreview').hidden = true; $('#aiChecks').innerHTML = '';
-      $('#aiPhotoConsentBox').hidden = true; $('#aiSend').hidden = true; status($('#aiStatus'), '');
+      measured = null; $('#aiPreview').hidden = true; $('#aiChecks').innerHTML = '';
+      $('#aiSend').hidden = true; $('#aiDiag').hidden = true; status($('#aiStatus'), '');
     }
     function loadFile(f) {
       resetPhotoUi();
@@ -627,7 +629,7 @@
         c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // respeta la orientación EXIF y no copia metadatos
         URL.revokeObjectURL(url);
         $('#aiPreviewImg').src = c.toDataURL('image/jpeg', 0.85); $('#aiPreview').hidden = false;
-        if (Math.min(w, h) < 480) return rejectPhoto([['bad', 'La foto tiene poca resolución. Probá con la cámara del teléfono.']]);
+        if (Math.min(w, h) < 480) return rejectPhoto([['bad', 'La foto tiene poca resolución. Probá con la cámara del teléfono.']], null);
         checkPhoto(c);
       };
       img.onerror = function () { URL.revokeObjectURL(url); status($('#aiStatus'), 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
@@ -637,38 +639,46 @@
       var ul = $('#aiChecks'); ul.innerHTML = '';
       list.forEach(function (c) { ul.appendChild(el('li', 'is-' + c[0], c[1])); });
     }
-    function rejectPhoto(list) {
-      renderChecks(list);
+    function rejectPhoto(list, diag) {
+      renderChecks(list); showDiag(diag);
       status($('#aiStatus'), 'Esta foto no sirve para la orientación. Sacá otra siguiendo las indicaciones, o seguí sin foto.', 'error');
       Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
     }
     function checkPhoto(canvas) {
       renderChecks([['info', 'Revisando la foto…']]);
       Promise.resolve(loadLandmarker()).then(function (lm) {
-        var res = lm.detect(canvas);
-        var list = evaluatePhoto(canvas, res && res.faceLandmarks || []);
-        if (list.some(function (c) { return c[0] === 'bad'; })) return rejectPhoto(list);
-        renderChecks(list);
-        photo = canvas.toDataURL('image/jpeg', 0.85).split(',')[1]; photoOk = true;
-        $('#aiPhotoConsentBox').hidden = false; $('#aiSend').hidden = false; status($('#aiStatus'), '');
+        var res = lm.detect(canvas), faces = res && res.faceLandmarks || [];
+        var diag = { controles: {} };
+        var list = evaluatePhoto(canvas, faces, diag.controles);
+        if (list.some(function (c) { return c[0] === 'bad'; })) return rejectPhoto(list, diag);
+        measured = measureSkin(canvas, faces[0]);
+        diag.indicadores = measured.metrics; diag.hallazgos = measured.findings;
+        renderChecks(list); showDiag(diag);
+        $('#aiSend').hidden = false; status($('#aiStatus'), '');
         Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
       }).catch(function () {
         renderChecks([['warn', 'No pudimos revisar la foto en este dispositivo.']]);
         status($('#aiStatus'), 'Sin poder revisar la foto no la usamos. Podés seguir sin foto.', 'error');
       });
     }
-    function evaluatePhoto(canvas, faces) {
+    function showDiag(d) {
+      var box = $('#aiDiag'); if (!DIAG || !d) { box.hidden = true; return; }
+      box.textContent = JSON.stringify(d, null, 1); box.hidden = false;
+    }
+    function evaluatePhoto(canvas, faces, m) {
       if (!faces.length) return [['bad', 'No encontramos un rostro. Ponete de frente y que se vea toda tu cara.']];
       if (faces.length > 1) return [['bad', 'Se ve más de una persona. Tiene que aparecer solo tu cara.']];
       var P = faces[0], W = canvas.width, H = canvas.height, out = [];
       var xs = P.map(function (p) { return p.x; }), ys = P.map(function (p) { return p.y; });
       var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+      m.anchoRostro = +(maxX - minX).toFixed(3);
       if (minX < 0 || minY < 0 || maxX > 1 || maxY > 1) out.push(['bad', 'Tu cara quedó cortada. Alejá un poco la cámara.']);
       else if (maxX - minX < PHOTO_RULES.minFaceWidth) out.push(['bad', 'Tu cara se ve muy chica. Acercá la cámara.']);
       else out.push(['ok', 'Un solo rostro, bien encuadrado.']);
       // Orientación: nariz centrada entre los bordes del rostro (giro) y ojos nivelados (inclinación).
       var nose = P[1], l = P[234], r = P[454], eL = P[33], eR = P[263];
       var dl = Math.abs(nose.x - l.x), dr = Math.abs(r.x - nose.x), roll = Math.abs(Math.atan2((eR.y - eL.y) * H, (eR.x - eL.x) * W) * 180 / Math.PI);
+      m.giro = +(Math.min(dl, dr) / Math.max(dl, dr)).toFixed(2); m.inclinacion = +roll.toFixed(1);
       if (Math.min(dl, dr) / Math.max(dl, dr) < PHOTO_RULES.minYawBalance) out.push(['bad', 'Tu cara está girada. Mirá de frente a la cámara.']);
       else if (roll > PHOTO_RULES.maxRollDeg) out.push(['bad', 'La cabeza está inclinada. Mantenela derecha.']);
       else out.push(['ok', 'Mirada de frente.']);
@@ -676,6 +686,7 @@
       var bx = Math.max(0, minX * W), by = Math.max(0, minY * H), bw = Math.min(W, maxX * W) - bx, bh = Math.min(H, maxY * H) - by;
       var g = grayCrop(canvas, bx, by, bw, bh, 256);
       var q = imageStats(g);
+      m.nitidez = Math.round(q.sharpness); m.quemado = +q.clipHigh.toFixed(3); m.oscuro = +q.clipLow.toFixed(3); m.contraste = q.contrast;
       if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto está movida o desenfocada. Sostené el teléfono quieto.']);
       else out.push(['ok', 'Foto nítida.']);
       if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos en la cara. Buscá una luz más suave.']);
@@ -684,9 +695,77 @@
       // Luz despareja entre mejillas: aviso, no bloquea.
       var s = (maxX - minX) * W * 0.12;
       var mL = meanLum(canvas, P[50].x * W - s / 2, P[50].y * H - s / 2, s), mR = meanLum(canvas, P[280].x * W - s / 2, P[280].y * H - s / 2, s);
+      m.luzLados = +(Math.max(mL, mR) / Math.max(1, Math.min(mL, mR))).toFixed(2);
       if (Math.max(mL, mR) / Math.max(1, Math.min(mL, mR)) > PHOTO_RULES.maxCheekRatio) out.push(['warn', 'La luz llega más de un lado. Si podés, ponete de frente a la ventana.']);
       out.push(['info', 'No podemos detectar maquillaje ni filtros: si usaste alguno, mejor sacá otra.']);
       return out;
+    }
+
+    /**
+     * Indicadores por zona con los puntos faciales (índices de la malla de MediaPipe):
+     * frente y nariz (zona T) contra mejillas. Comparar zonas del mismo rostro reduce el efecto del tono
+     * de piel y de la luz general, pero no lo elimina: por eso los umbrales se calibran con fotos reales.
+     */
+    var ZONE_T = [151, 108, 337, 4, 195, 5], ZONE_CHEEKS = [50, 117, 205, 280, 346, 425];
+    function measureSkin(canvas, P) {
+      var W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d');
+      var xs = P.map(function (p) { return p.x; });
+      var size = Math.max(8, Math.round((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * W * 0.08));
+      function patch(i) {
+        var x = Math.round(P[i].x * W - size / 2), y = Math.round(P[i].y * H - size / 2);
+        return { x: Math.max(0, x), y: Math.max(0, y) };
+      }
+      function zone(ids) {
+        var spec = 0, red = 0, n = 0, nRed = 0, tex = 0, cv = 0;
+        ids.forEach(function (i) {
+          var pt = patch(i), d = ctx.getImageData(pt.x, pt.y, size, size).data;
+          for (var k = 0; k < d.length; k += 4) {
+            var r = d[k], g = d[k + 1], b = d[k + 2], y = 0.299 * r + 0.587 * g + 0.114 * b;
+            var mx = Math.max(r, g, b), mn = Math.min(r, g, b), sat = mx ? (mx - mn) / mx : 0;
+            n++;
+            if (y >= 230 && sat < 0.25) { spec++; continue; } // reflejo especular (brillo): no cuenta para el color
+            red += (r - g) / (r + g + b + 1); nRed++;
+          }
+          var fine = grayCrop(canvas, pt.x, pt.y, size, size, 32), coarse = grayCrop(canvas, pt.x, pt.y, size, size, 8);
+          tex += lapEnergy(fine); cv += detrendedCv(coarse);
+        });
+        return { spec: spec / n, red: nRed ? red / nRed : 0, tex: tex / ids.length, cv: cv / ids.length };
+      }
+      var T = zone(ZONE_T), C = zone(ZONE_CHEEKS), R = SKIN_RULES, f = [];
+      var metrics = { brilloZonaT: +T.spec.toFixed(3), brilloMejillas: +C.spec.toFixed(3), rojezDif: +(C.red - T.red).toFixed(3),
+        texturaMejillas: +C.tex.toFixed(2), tonoMejillas: +C.cv.toFixed(3) };
+      if (T.spec >= R.shineT && C.spec >= R.shineGeneralC) f.push('brillo_general');
+      else if (T.spec >= R.shineT && T.spec >= R.shineRatio * C.spec + 0.01) f.push('brillo_zona_t');
+      if (C.tex >= R.texture) f.push('textura_irregular');
+      if (C.cv >= R.toneCv) f.push('tono_desparejo');
+      if (C.red - T.red >= R.rednessDiff) f.push('enrojecimiento_visible');
+      return { findings: f, metrics: metrics };
+    }
+    function lapEnergy(im) {
+      var g = im.g, w = im.w, h = im.h, s = 0, m = 0, mean = 0;
+      for (var i = 0; i < g.length; i++) mean += g[i];
+      mean /= g.length;
+      for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+        var p = y * w + x; s += Math.abs(g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p]); m++;
+      }
+      return m ? (s / m) / (mean + 1) * 100 : 0; // relativo al brillo de la zona
+    }
+    // Variación del tono descontando la luz que cambia de a poco (plano a + b·x + c·y ajustado por mínimos
+    // cuadrados): así la sombra natural de la mejilla no cuenta como "tono desparejo".
+    function detrendedCv(im) {
+      var g = im.g, w = im.w, h = im.h, n = g.length, mean = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxg = 0, syg = 0;
+      for (var i = 0; i < n; i++) mean += g[i];
+      mean /= n;
+      for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+        var cx = x - (w - 1) / 2, cy = y - (h - 1) / 2, v = g[y * w + x] - mean;
+        sxx += cx * cx; syy += cy * cy; sxg += cx * v; syg += cy * v;
+      }
+      var b = sxx ? sxg / sxx : 0, c = syy ? syg / syy : 0, res = 0;
+      for (var y2 = 0; y2 < h; y2++) for (var x2 = 0; x2 < w; x2++) {
+        var r = g[y2 * w + x2] - mean - b * (x2 - (w - 1) / 2) - c * (y2 - (h - 1) / 2);
+        res += r * r;
+      }
+      return mean ? Math.sqrt(res / n) / mean : 0;
     }
     function grayCrop(canvas, x, y, w, h, size) {
       var k = size / Math.max(1, w), c = document.createElement('canvas');
@@ -711,11 +790,7 @@
       for (var i = 0; i < im.g.length; i++) t += im.g[i];
       return t / im.g.length;
     }
-    $('#aiSend').addEventListener('click', function () {
-      if (!photoOk) return;
-      if (!$('#aiPhotoConsent').checked) { status($('#aiStatus'), 'Para usar la foto, marcá que aceptás enviarla al servicio de IA. O seguí sin foto.', 'error'); return; }
-      submit(true);
-    });
+    $('#aiSend').addEventListener('click', function () { if (measured) submit(true); });
     $('#aiSkip').addEventListener('click', function () { submit(false); });
 
     // Envío: el servidor aplica las reglas (y la IA, si hay foto) y guarda solo el resultado.
@@ -723,30 +798,24 @@
       if (busy) return;
       var btn = withPhoto ? $('#aiSend') : $('#aiSkip');
       busy = true; setBusy(btn, true, 'Preparando tu orientación…');
-      if (withPhoto) status($('#aiStatus'), 'Puede demorar unos segundos.');
-      var body = { requestId: session && session.requestId, token: session && session.token, adult: true, answers: answers, clientId: cid };
-      if (withPhoto) { body.image = photo; body.mediaType = 'image/jpeg'; body.photoConsent = true; var ts = $('input[name="cf-turnstile-response"]'); body.turnstileToken = ts ? ts.value : ''; }
-      api('analyze', body, 60000).then(function (r) {
+      // Al servidor van las respuestas y, si hubo foto, solo lo medido en el teléfono (nunca la imagen).
+      var body = { requestId: session && session.requestId, token: session && session.token, adult: true, answers: answers };
+      if (withPhoto) body.photo = { findings: measured.findings, metrics: measured.metrics };
+      api('analyze', body, 30000).then(function (r) {
         busy = false; setBusy(btn, false);
-        if (r.ok && r.status === 'retry') {
-          show('foto'); resetPhotoUi(); status($('#aiStatus'), (r.retry_reason || 'La foto no sirvió.') + ' Sacá otra o seguí sin foto.', 'error');
-          Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() }); return;
-        }
-        if (r.ok && r.status === 'not_allowed') { show('foto'); resetPhotoUi(); status($('#aiStatus'), 'La foto tiene que ser de tu propia cara y solo para mayores de 18 años.', 'error'); return; }
         if (r.code === 'invalid_token') {
           store.del('sessionStorage', 'cc_lead'); session = null; show('datos');
           status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos.', 'error'); return;
         }
         if (!r.ok) { status(withPhoto ? $('#aiStatus') : $('#aiQStatus'), 'No pudimos preparar tu orientación. Probá de nuevo en un momento.', 'error'); return; }
-        photo = null; // no se conserva en memoria
         renderResult(r);
         Track.send('analisis_resultado', { dedupeKey: 'analisis_resultado:' + PAGE_LOADED_AT });
       });
     }
 
     // 5. Resultado: cada conclusión muestra su origen
-    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto (IA)': 'Foto · IA', 'evaluación presencial': 'En la consulta' };
-    function origin(o) { var s = el('span', 'ai-origin' + (o === 'foto (IA)' ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); return s; }
+    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto': 'Según tu foto', 'evaluación presencial': 'En la consulta' };
+    function origin(o) { var s = el('span', 'ai-origin' + (o === 'foto' ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); return s; }
     function block(title, items, cls) {
       var b = el('div', 'ai-block' + (cls ? ' ' + cls : '')); b.appendChild(el('h4', null, title));
       var ul = el('ul', 'ai-focus');
@@ -771,8 +840,8 @@
         c.appendChild(ul);
         if (r.photoLimits) c.appendChild(el('p', 'ai-note', r.photoLimits));
       } else {
-        c.appendChild(el('p', 'ai-note', r.photo === 'analizada' ? 'La IA no identificó características claras en la foto.' :
-          r.photo === 'no_disponible' ? 'No pudimos analizar la foto: la orientación sale de tus respuestas.' : 'No sumaste foto: la orientación sale de tus respuestas.'));
+        c.appendChild(el('p', 'ai-note', r.photo === 'analizada' ? 'En la foto no se midieron diferencias claras de brillo, textura o tono.' :
+          'No sumaste foto: la orientación sale de tus respuestas.'));
       }
       out.appendChild(c);
       // D. Qué podría aportar una limpieza facial
@@ -790,7 +859,7 @@
       var cta = el('a', 'btn', 'Reservá tu sesión'); cta.href = '#reservar';
       cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
       var again = el('button', 'btn btn-ghost', 'Volver a empezar'); again.type = 'button';
-      again.addEventListener('click', function () { answers = {}; resetPhotoUi(); $('#aiPhotoConsent').checked = false; startQuiz(); });
+      again.addEventListener('click', function () { answers = {}; resetPhotoUi(); startQuiz(); });
       acts.appendChild(cta); acts.appendChild(again); out.appendChild(acts);
       show('resultado'); out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });

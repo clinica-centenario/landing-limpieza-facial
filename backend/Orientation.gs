@@ -1,8 +1,8 @@
 /**
- * Orientación cosmética: cuestionario + reglas explicables (+ observaciones de la foto por IA, si las hay).
+ * Orientación cosmética: cuestionario + reglas explicables (+ indicadores medidos en la foto, si los hay).
  *
  * Reglas versionadas y revisables por la profesional. Cada conclusión lleva:
- *   - origin: 'cuestionario' | 'foto (IA)' | 'evaluación presencial'
+ *   - origin: 'cuestionario' | 'foto' | 'evaluación presencial'
  *   - rule:   identificador de la regla que la produjo
  * No se nombran enfermedades, no se recomiendan productos ni técnicas, no se deriva:
  * lo complejo queda "para evaluar en la consulta".
@@ -11,7 +11,17 @@
 var ORIENTATION_RULES_VERSION = 'v1-2026-11';
 
 var ORIGIN_QUIZ = 'cuestionario';
-var ORIGIN_PHOTO = 'foto (IA)';
+var ORIGIN_PHOTO = 'foto';
+
+/** Textos fijos por indicador medido en la foto (revisables por la profesional). */
+var PHOTO_OBSERVATIONS_ = {
+  brillo_zona_t: 'Se ven más reflejos de brillo en frente y nariz que en las mejillas.',
+  brillo_general: 'Se ven reflejos de brillo en varias zonas del rostro.',
+  textura_irregular: 'La textura de las mejillas se ve irregular.',
+  tono_desparejo: 'El tono de las mejillas se ve desparejo.',
+  enrojecimiento_visible: 'Las mejillas se ven más rojizas que la frente.'
+};
+var PHOTO_LIMITS_TEXT = 'Son mediciones de la foto: la luz y la cámara pueden cambiarlas. La profesional lo confirma en persona.';
 var ORIGIN_VISIT = 'evaluación presencial';
 
 /** Preguntas y respuestas válidas. Lo que no está acá se descarta. */
@@ -83,18 +93,19 @@ function skinProfile_(a) {
 
 /**
  * @param a        respuestas limpias (cleanAnswers_)
- * @param obs      observaciones de la foto ya filtradas: [{category, area, text}] (vacío si no hubo foto)
- * @param photo    'analizada' | 'sin_foto' | 'no_disponible'
+ * @param findings indicadores medidos en la foto (PHOTO_FINDINGS), vacío si no hubo foto
+ * @param photo    'analizada' | 'sin_foto'
  */
-function buildOrientation_(a, obs, photo) {
-  obs = obs || [];
-  var has = function (cat) { return obs.some(function (o) { return o.category === cat; }); };
+function buildOrientation_(a, findings, photo) {
+  findings = findings || [];
+  var has = function (cat) { return findings.indexOf(cat) >= 0; };
   var imp = a.imperfecciones || [];
   var profile = skinProfile_(a);
   var out = {
     rulesVersion: ORIENTATION_RULES_VERSION,
     profile: { type: profile.type, warning: profile.warning, origin: ORIGIN_QUIZ, rule: profile.rule },
-    needs: [], observations: [], benefits: [], limits: [], toEvaluate: [], tips: [], photo: photo
+    needs: [], observations: [], benefits: [], limits: [], toEvaluate: [], tips: [], photo: photo,
+    photoLimits: photo === 'analizada' ? PHOTO_LIMITS_TEXT : ''
   };
 
   // B. Necesidades referidas (dimensiones separadas del tipo de piel)
@@ -105,22 +116,22 @@ function buildOrientation_(a, obs, photo) {
   }
   if (a.descamacion === 'si' || a.descamacion === 'aveces') out.needs.push(item_('Sensación de sequedad o zonas ásperas, según contaste.', ORIGIN_QUIZ, 'NEC-SEC-1'));
 
-  // C. Observaciones de la foto (solo lo que devolvió el análisis y pasó los filtros)
-  obs.forEach(function (o) { out.observations.push(item_((o.areaLabel ? o.areaLabel + ': ' : '') + o.text, ORIGIN_PHOTO, 'OBS-' + o.category)); });
+  // C. Observaciones de la foto (indicadores medidos en el teléfono)
+  findings.forEach(function (f) { if (PHOTO_OBSERVATIONS_[f]) out.observations.push(item_(PHOTO_OBSERVATIONS_[f], ORIGIN_PHOTO, 'OBS-' + f)); });
 
   // D. Qué podría aportar una limpieza facial (según lo encontrado)
   var b = function (text, origin, rule) { if (!out.benefits.some(function (x) { return x.rule === rule; })) out.benefits.push(item_(text, origin, rule)); };
   var src = function (fromPhoto) { return fromPhoto ? ORIGIN_PHOTO : ORIGIN_QUIZ; };
-  if (has('puntos_negros_aparentes') || imp.indexOf('puntos_negros') >= 0)
-    b('Despejar los puntos negros que la profesional considere aptos para extracción.', src(has('puntos_negros_aparentes')), 'BEN-PN');
+  if (imp.indexOf('puntos_negros') >= 0)
+    b('Despejar los puntos negros que la profesional considere aptos para extracción.', ORIGIN_QUIZ, 'BEN-PN');
   if (has('brillo_zona_t') || has('brillo_general') || a.brillo === 'toda' || a.brillo === 'zona_t')
     b('Sensación de piel más limpia y con menos brillo después de la sesión. El brillo vuelve con los días.', src(has('brillo_zona_t') || has('brillo_general')), 'BEN-BRI');
-  if (has('poros_visibles') || imp.indexOf('poros') >= 0)
-    b('Poros con aspecto más limpio. No se cierran de forma permanente.', src(has('poros_visibles')), 'BEN-POR');
+  if (imp.indexOf('poros') >= 0)
+    b('Poros con aspecto más limpio. No se cierran de forma permanente.', ORIGIN_QUIZ, 'BEN-POR');
   if (has('textura_irregular') || imp.indexOf('textura') >= 0 || a.objetivo === 'suavidad')
     b('Piel más suave al tacto.', src(has('textura_irregular')), 'BEN-TEX');
-  if (has('zonas_secas_aparentes') || a.tirantez === 'siempre' || a.descamacion === 'si' || a.objetivo === 'confort')
-    b('Más confort e hidratación superficial al terminar la sesión.', src(has('zonas_secas_aparentes')), 'BEN-CONF');
+  if (a.tirantez === 'siempre' || a.descamacion === 'si' || a.objetivo === 'confort')
+    b('Más confort e hidratación superficial al terminar la sesión.', ORIGIN_QUIZ, 'BEN-CONF');
   if (has('tono_desparejo') || a.objetivo === 'luminosidad')
     b('Aspecto más luminoso durante los días siguientes.', src(has('tono_desparejo')), 'BEN-LUM');
   if (a.objetivo === 'limpieza' || !out.benefits.length)
@@ -130,7 +141,6 @@ function buildOrientation_(a, obs, photo) {
   // Para evaluar en la consulta (no se deriva: queda a criterio de la profesional)
   var e = function (text, origin, rule) { out.toEvaluate.push(item_(text, origin, rule)); };
   if (a.lesiones === 'si') e('Contaste irritación fuerte, heridas, lesiones que duelen o algo que cambia o sangra. La profesional lo evalúa en persona antes de definir cualquier procedimiento.', ORIGIN_QUIZ, 'EVA-LES');
-  if (has('zona_para_evaluar')) e('En la foto se ve una zona que conviene que la profesional mire en persona.', ORIGIN_PHOTO, 'EVA-FOTO');
   if (has('enrojecimiento_visible') || a.reactividad === 'seguido') e('La profesional adapta la sesión a la tolerancia de tu piel.', has('enrojecimiento_visible') ? ORIGIN_PHOTO : ORIGIN_QUIZ, 'EVA-SENS');
   if (a.exfoliantes === 'si') e('Usás exfoliantes o retinoides: la profesional lo tiene en cuenta para decidir qué se puede hacer en esta sesión.', ORIGIN_QUIZ, 'EVA-EXF');
   if (a.procedimiento === 'si') e('Te hiciste un procedimiento o tratamiento en el último mes: contáselo a la profesional en la consulta.', ORIGIN_QUIZ, 'EVA-PROC');

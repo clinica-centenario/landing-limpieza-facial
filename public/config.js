@@ -43,7 +43,7 @@ window.CC_CONFIG = {
   // Canal para ejercer derechos sobre datos personales (Ley 18.331). PENDIENTE.
   PRIVACY_CONTACT: '',
 
-  // Análisis de piel con IA. Requiere AI_ENABLED y ANTHROPIC_API_KEY en el script.
+  // Orientación para tu piel (cuestionario + foto analizada en el teléfono, sin servicios externos).
   // false = la sección no se muestra. Pide los datos antes de la foto y guarda el resultado en la pestaña "Análisis de piel".
   AI_ANALYSIS_ENABLED: true,
 

@@ -7,8 +7,7 @@
 function doGet() {
   var cfg = getConfig();
   var missing = missingConfig_(cfg);
-  return json_({ ok: true, service: 'cc-limpieza-facial', env: cfg.ENV, ready: missing.length === 0, missing: missing,
-                 aiReady: !!(cfg.AI_ENABLED && getSecret_('ANTHROPIC_API_KEY')) });
+  return json_({ ok: true, service: 'cc-limpieza-facial', env: cfg.ENV, ready: missing.length === 0, missing: missing });
 }
 
 function doPost(e) {

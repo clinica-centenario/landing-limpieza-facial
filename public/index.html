@@ -149,7 +149,7 @@
           <ul class="checks ai-tips">
             <li>9 preguntas cortas, unos 2 minutos.</li>
             <li>La foto es opcional: podés hacerlo sin foto.</li>
-            <li>Tu foto no se guarda.</li>
+            <li>Tu foto se analiza en tu teléfono: no se envía ni se guarda.</li>
           </ul>
           <p class="ai-disclaimer">Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.</p>
         </div>
@@ -236,11 +236,9 @@
               <img id="aiPreviewImg" alt="Vista previa de tu foto">
               <ul class="ai-checks" id="aiChecks" aria-live="polite"></ul>
             </div>
-            <div class="field check" id="aiPhotoConsentBox" hidden>
-              <input id="aiPhotoConsent" type="checkbox">
-              <label for="aiPhotoConsent">Acepto que esta foto se envíe a un servicio de inteligencia artificial (Anthropic) solo para darme esta orientación. La clínica no la guarda.</label>
-            </div>
+            <pre class="ai-diag" id="aiDiag" hidden></pre>
             <button type="button" class="btn btn-block" id="aiSend" hidden>Ver mi orientación con la foto</button>
+            <p class="ai-note">Tu foto se analiza en tu teléfono: no se envía ni se guarda.</p>
             <p class="form-status" id="aiStatus" role="status"></p>
             <button type="button" class="link-btn" id="aiSkip">Seguir sin foto</button>
           </div>

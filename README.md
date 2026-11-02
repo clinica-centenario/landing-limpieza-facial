@@ -132,20 +132,21 @@ Recorrido: introducción (18+) → datos de contacto (la misma solicitud sirve p
 | Pieza | Dónde | Qué hace |
 |---|---|---|
 | Cuestionario | `public/app.js` (`QUIZ`) | Brillo, tirantez, descamación, reactividad, imperfecciones, objetivo, exfoliantes/retinoides, procedimientos recientes, lesiones. "No sé" donde corresponde |
-| Control técnico de la foto | `public/app.js` (`PHOTO_RULES`), en el teléfono | MediaPipe Face Landmarker (Apache-2.0): un solo rostro, encuadre y tamaño, giro e inclinación, nitidez, exposición (recortes y contraste, no brillo promedio) y aviso de luz despareja. **No detecta maquillaje ni filtros**: se le pide a la persona. Si no puede revisar la foto, no la usa |
+| Control técnico de la foto | `public/app.js` (`PHOTO_RULES`), en el teléfono | MediaPipe Face Landmarker (Apache-2.0, el mismo modelo que incluye UniFace): un solo rostro, encuadre y tamaño, giro e inclinación, nitidez, exposición (recortes y contraste, no brillo promedio) y aviso de luz despareja. **No detecta maquillaje ni filtros**: se le pide a la persona. Si no puede revisar la foto, no la usa |
+| Indicadores de piel en la foto | `public/app.js` (`SKIN_RULES`, `measureSkin`), en el teléfono | Con los puntos faciales se toman zonas fijas (frente y nariz contra mejillas) y se miden reflejos de brillo, textura fina, variación de tono (descontando la luz que cambia de a poco) y rojez relativa (sin contar reflejos). Son mediciones de imagen con umbrales **provisorios**, no un modelo validado de piel |
 | Reglas de orientación | `backend/Orientation.gs` (`ORIENTATION_RULES_VERSION`) | Tipo de piel solo con el cuestionario (si se contradice: el más probable, con aviso), necesidades referidas, beneficios posibles, límites, "para ver en la consulta" y cuidados básicos. Cada conclusión lleva origen y regla |
-| Descripción de la foto | `backend/Analysis.gs` | Claude describe solo lo claramente visible, en categorías cerradas, con salida estructurada. Es un modelo general **no validado para piel**: la landing lo aclara ("orientativo y analizado por IA, no certificado por profesionales") |
-| Registro | Pestaña "Análisis de piel" | Resultado con origen y regla de cada conclusión, versión de reglas y si hubo foto. **No se guardan la foto ni las respuestas** |
+| Textos de la foto | `backend/Orientation.gs` (`PHOTO_OBSERVATIONS_`) | Un texto fijo por indicador encontrado, con la aclaración de que la luz y la cámara pueden cambiar las mediciones |
+| Registro | Pestaña "Análisis de piel" | Resultado con origen y regla de cada conclusión, versión de reglas, si hubo foto y los **números medidos** (para calibrar). **No se guardan la foto ni las respuestas** |
 
 **Decisiones de la clínica:** no se recomiendan productos, técnicas ni tratamientos; no se deriva a otros profesionales, lo complejo queda "para ver con la profesional en la consulta"; los beneficios se basan en lo que se encontró; los cuidados son básicos y cortos.
 
-**Resguardos:** el servidor descarta textos con términos diagnósticos, porcentajes o promesas; la foto viaja a Anthropic solo con consentimiento específico, se reduce y re-codifica en el teléfono (sin EXIF/GPS) y no se guarda; si la IA falla, rechaza o llega al tope de uso, la orientación sale igual con el cuestionario; topes por hora, día y dispositivo; analítica solo con hitos del recorrido (`analisis_inicio`, `analisis_cuestionario_completo`, `analisis_foto_aceptada/rechazada`, `analisis_resultado`, `analisis_clic_reserva`), sin respuestas ni hallazgos.
+**Resguardos:** **la foto nunca sale del teléfono** (el servidor rechaza cualquier imagen); al servidor llegan solo categorías cerradas y números acotados; no se usa ningún proveedor externo de IA, reconocimiento de identidad ni estimación de edad, género, etnia o emoción; analítica solo con hitos del recorrido (`analisis_inicio`, `analisis_cuestionario_completo`, `analisis_foto_aceptada/rechazada`, `analisis_resultado`, `analisis_clic_reserva`), sin respuestas ni hallazgos.
 
-**Para activar la foto:** cargar el secreto `ANTHROPIC_API_KEY` en Propiedades del script (con límite de gasto en la consola de Anthropic). Sin clave, el recorrido funciona solo con el cuestionario.
+**Descartados:** SPOTSCAN+ (La Roche-Posay/ModiFace) no tiene API pública; solo se toma como referencia de recorrido. DeepFace no aporta nada para piel y sus funciones propias (identidad, edad, género, emoción, raza) están excluidas. De UniFace se usan solo los modelos con licencia comercial (los de MediaPipe); SCRFD y 2d106det no se pueden usar comercialmente y BiSeNet tiene la licencia de origen sin aclarar.
 
-**Pruebas:** `tests/analysis.test.js` (reglas, contradicciones, respuestas incompletas, fallo y rechazo de la IA, filtros, consentimientos, privacidad) y `tests/e2e_orientacion.py` (recorrido completo y controles de foto a partir de una selfie de prueba). **Pendiente antes de anunciar la foto:** probar con selfies reales de distintos tonos de piel, teléfonos y luces para calibrar `PHOTO_RULES`, y revisar que las descripciones de la IA sean correctas en esos casos.
+**Pruebas en teléfonos:** abrir la landing con `?diagnostico=1`. Debajo de la foto aparecen los números de los controles y de los indicadores; también quedan en la columna "Mediciones de la foto". Con varios casos reales (tonos de piel, teléfonos, luces) se ajustan `PHOTO_RULES` y `SKIN_RULES`.
 
-**A validar:** la foto del rostro es un dato personal y se procesa con un proveedor en el exterior; conviene que un asesor confirme el aviso de privacidad y el registro ante la URCDP (Ley 18.331).
+**Pruebas automáticas:** `tests/analysis.test.js` (reglas, contradicciones, respuestas incompletas, filtros, privacidad) y `tests/e2e_orientacion.py` (recorrido completo y controles de foto a partir de una selfie de prueba).
 
 ## 8. Pendientes centralizados
 
@@ -159,7 +160,7 @@ Recorrido: introducción (18+) → datos de contacto (la misma solicitud sirve p
 | Cancelación y reprogramación | `config.js` → `CANCELLATION_POLICY` | No se muestra; no hay autogestión de cambios |
 | Canal para derechos de datos personales | `config.js` → `PRIVACY_CONTACT` | El aviso no nombra canal |
 | URL definitiva | `config.js` → `CANONICAL_URL` y `index.html` | Se usa `/limpieza-facial` |
-| Foto en la orientación de piel | Secreto `ANTHROPIC_API_KEY` | La orientación funciona solo con el cuestionario |
+| Calibración de la foto | Pruebas en teléfonos con `?diagnostico=1` | Los umbrales de `PHOTO_RULES` y `SKIN_RULES` son provisorios |
 
 ## 9. Pruebas
 

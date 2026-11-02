@@ -69,14 +69,6 @@ var DEFAULT_CONFIG = {
   MAX_LEADS_GLOBAL_MINUTE: 30,
   ALLOWED_ORIGINS: '',            // opcional, orígenes esperados (solo informativo para logs)
 
-  // ── Análisis de piel con IA (opcional) ────────────────────
-  // Requiere además el secreto ANTHROPIC_API_KEY en Propiedades del script.
-  AI_ENABLED: true,               // sin ANTHROPIC_API_KEY la landing informa que no está disponible
-  AI_MODEL: 'claude-sonnet-5-5',
-  AI_MAX_PER_HOUR: 60,            // tope global por hora (control de costo)
-  AI_MAX_PER_DAY: 300,            // tope global por día
-  AI_MAX_PER_CLIENT_DAY: 5,       // por dispositivo (identificador anónimo del navegador)
-
   // ── Meta Conversions API (opcional) ───────────────────────
   META_PIXEL_ID: '',              // PENDIENTE
   CAPI_ENABLED: false,
