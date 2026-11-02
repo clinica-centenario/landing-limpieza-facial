@@ -8,7 +8,7 @@
  * lo complejo queda "para evaluar en la consulta".
  */
 
-var ORIENTATION_RULES_VERSION = 'v2-2026-11';
+var ORIENTATION_RULES_VERSION = 'v3-2026-11';
 
 var ORIGIN_QUIZ = 'cuestionario';
 var ORIGIN_PHOTO = 'foto';
@@ -22,11 +22,17 @@ var PHOTO_OBSERVATIONS_ = {
   textura_irregular: 'Textura irregular en las mejillas.',
   tono_desparejo: 'Tono desparejo en las mejillas.',
   enrojecimiento_visible: 'Mejillas más rojizas que la frente.',
-  puntos_negros_posibles: 'Posibles puntos negros en la nariz.',
-  poros_visibles_posibles: 'Poros visibles en las mejillas, cerca de la nariz.'
+  puntos_negros_posibles: 'Posibles puntos negros en la nariz',
+  poros_visibles_posibles: 'Poros visibles en las mejillas, cerca de la nariz.',
+  granos_posibles: 'Posibles granos o zonas inflamadas',
+  milium_posible: 'Posibles quistes de milium (puntitos blancos) cerca de los ojos o en los pómulos',
+  lunares_visibles: 'Lunares visibles',
+  manchas_posibles: 'Posibles manchas o zonas más oscuras'
 };
+// Conteo que acompaña al texto (viene de las mediciones del teléfono).
+var PHOTO_COUNTS_ = { puntos_negros_posibles: 'puntosNegros', granos_posibles: 'granos', milium_posible: 'milium', lunares_visibles: 'lunares', manchas_posibles: 'manchas' };
 // Indicadores con detección todavía en prueba: la landing los marca como tales.
-var PHOTO_BETA_ = ['puntos_negros_posibles', 'poros_visibles_posibles'];
+var PHOTO_BETA_ = ['puntos_negros_posibles', 'poros_visibles_posibles', 'granos_posibles', 'milium_posible', 'lunares_visibles', 'manchas_posibles'];
 var PHOTO_LIMITS_TEXT = 'Son mediciones de tus fotos: la luz, la cámara y la hora del día pueden cambiarlas. La profesional lo confirma en persona.';
 
 /** Preguntas y respuestas válidas. Lo que no está acá se descarta. 'brillo' solo se pregunta si no hay foto. */
@@ -106,9 +112,11 @@ function skinProfile_(a, findings, hasPhoto) {
  * @param a        respuestas limpias (cleanAnswers_)
  * @param findings indicadores medidos en la foto (PHOTO_FINDINGS), vacío si no hubo foto
  * @param photo    'analizada' | 'sin_foto'
+ * @param metrics  números medidos en el teléfono (para los conteos), opcional
  */
-function buildOrientation_(a, findings, photo) {
+function buildOrientation_(a, findings, photo, metrics) {
   findings = findings || [];
+  metrics = metrics || {};
   var hasPhoto = photo === 'analizada';
   var has = function (cat) { return findings.indexOf(cat) >= 0; };
   var wants = function (k) { return (a.mejorar || []).indexOf(k) >= 0; };
@@ -124,7 +132,9 @@ function buildOrientation_(a, findings, photo) {
   // Lo que identificamos en la piel (indicadores medidos en el teléfono)
   findings.forEach(function (f) {
     if (!PHOTO_OBSERVATIONS_[f]) return;
-    var it = item_(PHOTO_OBSERVATIONS_[f], ORIGIN_PHOTO, 'OBS-' + f);
+    var text = PHOTO_OBSERVATIONS_[f], cnt = Number(metrics[PHOTO_COUNTS_[f]]);
+    if (PHOTO_COUNTS_[f]) text += (cnt > 0 ? ' (' + cnt + ')' : '') + '.';
+    var it = item_(text, ORIGIN_PHOTO, 'OBS-' + f);
     if (PHOTO_BETA_.indexOf(f) >= 0) it.beta = true;
     out.observations.push(it);
   });
@@ -148,18 +158,22 @@ function buildOrientation_(a, findings, photo) {
   var tx = has('textura_irregular'), txQ = wants('suavidad');
   if (tx || txQ) b('Piel más suave al tacto.', src(tx, txQ), 'BEN-TEX');
   if (a.sequedad === 'siempre' || wants('confort')) b('Más confort e hidratación superficial al terminar la sesión.', ORIGIN_QUIZ, 'BEN-CONF');
-  var tn = has('tono_desparejo'), tnQ = wants('luminosidad');
+  if (has('milium_posible')) b('La profesional valora si corresponde extraer los quistes de milium.', ORIGIN_PHOTO, 'BEN-MIL');
+  var tn = has('tono_desparejo') || has('manchas_posibles'), tnQ = wants('luminosidad');
   if (tn || tnQ) b('Aspecto más luminoso durante los días siguientes.', src(tn, tnQ), 'BEN-LUM');
   if (!out.benefits.length) b('Limpieza profunda de residuos e impurezas acumuladas.', ORIGIN_QUIZ, 'BEN-LIMP');
   out.limits.push(item_('Una sesión no cierra poros de forma permanente, no borra marcas ni resuelve imperfecciones de fondo. El resultado depende de tu piel y de lo que defina la profesional.', ORIGIN_VISIT, 'LIM-1'));
+  if (has('manchas_posibles')) out.limits.push(item_('La limpieza facial no quita manchas: puede dar un aspecto más luminoso por unos días.', ORIGIN_VISIT, 'LIM-MAN'));
 
   // Para evaluar en la consulta (no se deriva: queda a criterio de la profesional)
   var e = function (text, origin, rule) { out.toEvaluate.push(item_(text, origin, rule)); };
   if (applies('lesiones')) e('Contaste irritación fuerte, heridas, lesiones que duelen o algo que cambia o sangra. La profesional lo evalúa en persona antes de definir cualquier procedimiento.', ORIGIN_QUIZ, 'EVA-LES');
+  if (has('granos_posibles')) e('Se ven posibles granos o zonas inflamadas: la profesional evalúa en persona cómo trabajarlos.', ORIGIN_PHOTO, 'EVA-GRA');
+  if (has('lunares_visibles')) e('Se ven lunares: la profesional los tiene en cuenta durante la sesión.', ORIGIN_PHOTO, 'EVA-LUN');
   if (has('enrojecimiento_visible') || a.reactividad === 'seguido') e('La profesional adapta la sesión a la tolerancia de tu piel.', has('enrojecimiento_visible') ? ORIGIN_PHOTO : ORIGIN_QUIZ, 'EVA-SENS');
   if (applies('exfoliantes')) e('Usás exfoliantes o retinoides: la profesional lo tiene en cuenta para decidir qué se puede hacer en esta sesión.', ORIGIN_QUIZ, 'EVA-EXF');
   if (applies('procedimiento')) e('Te hiciste un procedimiento o tratamiento en el último mes: contáselo a la profesional en la consulta.', ORIGIN_QUIZ, 'EVA-PROC');
-  if (out.observations.some(function (o) { return o.beta; })) e('Los puntos negros y poros los confirma la profesional: esa parte del análisis está en prueba.', ORIGIN_VISIT, 'EVA-BETA');
+  if (out.observations.some(function (o) { return o.beta; })) e('Lo marcado como "análisis en prueba" lo confirma la profesional en persona.', ORIGIN_VISIT, 'EVA-BETA');
   if (profile.warning) e('Tu tipo de piel lo confirma la profesional en la consulta.', ORIGIN_VISIT, 'EVA-TIPO');
 
   // Cuidados básicos (cortos, sin productos ni marcas)

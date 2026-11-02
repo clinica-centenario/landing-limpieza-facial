@@ -34,7 +34,7 @@ test('sin fotos: perfil, necesidades y beneficios con su origen; no guarda respu
   const row = rows(env)[0];
   assert.equal(row['ID solicitud'], env.lead.requestId);
   assert.match(row['Tipo de piel (orientativo)'], /^Mixta \[cuestionario · TIPO-04\]/);
-  assert.equal(row['Foto'], 'Sin foto'); assert.equal(row['Versión de reglas'], 'v2-2026-11'); assert.equal(row['Mediciones de la foto'], '');
+  assert.equal(row['Foto'], 'Sin foto'); assert.equal(row['Versión de reglas'], 'v3-2026-11'); assert.equal(row['Mediciones de la foto'], '');
   assert.ok(!/zona_t"|aveces|"puntos_negros"/.test(dump(env)), 'las respuestas crudas no se guardan');
 });
 
@@ -129,4 +129,20 @@ test('la misma solicitud reserva sin volver a cargar datos y el análisis queda 
   const r = env.post({ action: 'book', requestId: env.lead.requestId, token: env.lead.token, start, idempotencyKey: 'idem_analisis_000001' });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(rows(env)[0]['Reservó'], 'Sí');
+});
+
+test('elementos puntuales (en prueba): granos, milium, lunares y manchas con su conteo y su lugar en el resultado', () => {
+  const env = env0();
+  const r = env.analyze({ answers: QUIZ_PHOTO, photo: { findings: ['granos_posibles', 'milium_posible', 'lunares_visibles', 'manchas_posibles', 'puntos_negros_posibles'],
+    metrics: { granos: 2, milium: 1, lunares: 3, manchas: 1, puntosNegros: 5 } } });
+  const t = Object.fromEntries(r.observations.map(o => [o.rule, o.text]));
+  assert.equal(t['OBS-granos_posibles'], 'Posibles granos o zonas inflamadas (2).');
+  assert.equal(t['OBS-lunares_visibles'], 'Lunares visibles (3).');
+  assert.equal(t['OBS-puntos_negros_posibles'], 'Posibles puntos negros en la nariz (5).');
+  assert.ok(r.observations.every(o => o.beta && o.origin === 'foto'));
+  assert.ok(r.benefits.some(b => b.rule === 'BEN-MIL'));
+  assert.ok(r.limits.some(l => l.rule === 'LIM-MAN'), 'la limpieza no quita manchas');
+  assert.ok(r.toEvaluate.some(e => e.rule === 'EVA-GRA') && r.toEvaluate.some(e => e.rule === 'EVA-LUN'));
+  assert.ok(!/\bm[eé]dic[oa]s?\b|melanoma|acn[eé]|c[aá]ncer/i.test(JSON.stringify(r)), 'sin nombrar condiciones ni derivar');
+  assert.deepEqual(JSON.parse(rows(env)[0]['Mediciones de la foto']), { granos: 2, milium: 1, lunares: 3, manchas: 1, puntosNegros: 5 });
 });

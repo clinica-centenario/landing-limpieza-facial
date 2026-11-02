@@ -346,6 +346,9 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .ai-zones figcaption { text-align: center; font-size: 13px; color: var(--muted); margin-top: 6px; }
 .ai-beta { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: #fbf3e4; color: #7a5b17; white-space: nowrap; vertical-align: 1px; }
 .btn-wa { background: #1f8f4e; border-color: #1f8f4e; }
+.ai-legend { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; font-size: 13px; color: var(--text); }
+.ai-legend li { display: flex; align-items: center; gap: 6px; }
+.ai-legend-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid; display: inline-block; }
 .ai-disclaimer { margin-top: 14px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--cream); font-size: 13px; color: var(--text); }
 .ai-progress { height: 4px; border-radius: 4px; background: var(--line); margin: -4px 0 14px; overflow: hidden; }
 .ai-progress span { display: block; height: 100%; background: var(--green-700); width: 0; transition: width .2s; }

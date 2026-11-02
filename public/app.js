@@ -559,6 +559,179 @@
     return mean ? Math.sqrt(res / n) / mean : 0;
   }
 
+  // ── Detección de elementos puntuales en la piel (en prueba) ─────────────
+  // Visión por computadora clásica, en el teléfono: se arma una máscara de piel con la malla facial
+  // (sin ojos, cejas, labios ni fosas nasales), se compara cada punto con la piel que lo rodea
+  // (luminosidad y rojo en CIELab) y se agrupan los puntos distintos por tamaño, forma y contraste.
+  // Comparar con el entorno reduce el efecto del tono de piel y de la luz, pero hay falsos positivos
+  // (pecas, sombras, vello, poros): los umbrales se calibran con fotos reales (?diagnostico=1).
+  // Tamaños en píxeles con el rostro normalizado a 360 px de ancho (≈14 cm de mejilla a mejilla: ≈2,6 px por mm).
+  var SPOT_RULES = {
+    width: 360,              // ancho al que se normaliza el rostro
+    bgRadius: 10,            // radio del "entorno" para comparar (≈4 mm)
+    stainBgRadius: 30,       // las manchas son más grandes: se comparan con un entorno más amplio (≈12 mm)
+    blackhead: { minDark: 9, maxArea: 12, minCount: 3 },                     // puntos negros: hasta ≈1,5 mm, en la nariz
+    mole: { core: 12, minDark: 18, minArea: 8, maxArea: 190, minFill: 0.55 },  // lunares: ≈1,5 a 6 mm, redondos y bien oscuros
+    stain: { minDark: 6, maxDark: 30, minArea: 130, maxArea: 2900, minFill: 0.45 }, // manchas: más de ≈5 mm, de bordes suaves
+    maxElongation: 2.2,      // formas alargadas = pliegues, arrugas o sombras: no cuentan
+    pimple: { minRed: 7, minArea: 20, maxArea: 340, minFill: 0.45 },        // granos: ≈2 a 8 mm, rojos y redondeados
+    milium: { minLight: 11, maxChroma: 16, minArea: 1, maxArea: 21 }        // milium: ≈0,5 a 2 mm, claros, pómulos y debajo de los ojos
+  };
+  var FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+  var EYE_R = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+  var EYE_L = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398];
+  var BROW_R = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46], BROW_L = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
+  var LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185];
+  var NOSE_TIP_ZONE = [48, 278, 4, 45, 275, 5, 195];
+
+  function detectSpots(canvas, P) {
+    var R = SPOT_RULES, W = canvas.width, H = canvas.height;
+    var ox = FACE_OVAL.map(function (i) { return P[i].x * W; }), oy = FACE_OVAL.map(function (i) { return P[i].y * H; });
+    var x0 = Math.max(0, Math.min.apply(null, ox)), y0 = Math.max(0, Math.min.apply(null, oy));
+    var bw = Math.min(W, Math.max.apply(null, ox)) - x0, bh = Math.min(H, Math.max.apply(null, oy)) - y0;
+    var k = R.width / bw, w = R.width, h = Math.max(1, Math.round(bh * k));
+    var c = document.createElement('canvas'); c.width = w; c.height = h;
+    var ctx = c.getContext('2d'); ctx.drawImage(canvas, x0, y0, bw, bh, 0, 0, w, h);
+    var px = ctx.getImageData(0, 0, w, h).data;
+    var pt = function (i) { return [(P[i].x * W - x0) * k, (P[i].y * H - y0) * k]; };
+    // Máscara de piel: óvalo achicado, menos ojos (agrandados por las pestañas), cejas, labios y fosas nasales.
+    var m = document.createElement('canvas'); m.width = w; m.height = h;
+    var mc = m.getContext('2d');
+    function poly(ids, scale, color) {
+      var pts = ids.map(pt), cx = 0, cy = 0;
+      pts.forEach(function (p) { cx += p[0]; cy += p[1]; }); cx /= pts.length; cy /= pts.length;
+      mc.beginPath();
+      pts.forEach(function (p, j) { var X = cx + (p[0] - cx) * scale, Y = cy + (p[1] - cy) * scale; if (j) mc.lineTo(X, Y); else mc.moveTo(X, Y); });
+      mc.closePath(); mc.fillStyle = color; mc.fill();
+    }
+    poly(FACE_OVAL, 0.88, '#fff');
+    poly(EYE_R, 2.2, '#000'); poly(EYE_L, 2.2, '#000'); poly(BROW_R, 1.35, '#000'); poly(BROW_L, 1.35, '#000'); poly(LIPS, 1.2, '#000');
+    // Fosas nasales: se excluye solo la abertura (debajo de la punta), no las aletas, donde suele haber puntos negros.
+    var nos = [98, 327, 2].map(pt), nr = w * 0.045;
+    mc.beginPath(); mc.ellipse((nos[0][0] + nos[1][0]) / 2, (nos[0][1] + nos[1][1]) / 2 + nr * 0.4, Math.abs(nos[1][0] - nos[0][0]) / 2 + nr * 0.2, nr * 0.75, 0, 0, Math.PI * 2); mc.fillStyle = '#000'; mc.fill();
+    var md = mc.getImageData(0, 0, w, h).data, n = w * h;
+    var skin = new Uint8Array(n), L = new Float32Array(n), A = new Float32Array(n), B = new Float32Array(n);
+    for (var i = 0, j = 0; j < n; i += 4, j++) {
+      skin[j] = md[i] > 127 ? 1 : 0;
+      var lab = rgbToLab(px[i], px[i + 1], px[i + 2]); L[j] = lab[0]; A[j] = lab[1]; B[j] = lab[2];
+    }
+    var bgL = maskedBlur(L, skin, w, h, R.bgRadius), bgA = maskedBlur(A, skin, w, h, R.bgRadius), bgW = maskedBlur(L, skin, w, h, R.stainBgRadius);
+    var Ls = maskedBlur(L, skin, w, h, 3); // para manchas: piel suavizada, así la textura no "agujerea" la forma
+    // Para manchas se deja afuera una franja junto a los bordes de la piel (pelo, contorno, cejas, labios): ahí hay sombras.
+    var ones = new Uint8Array(n).fill(1), skinF = new Float32Array(n);
+    for (var s2 = 0; s2 < n; s2++) skinF[s2] = skin[s2];
+    var inner = maskedBlur(skinF, ones, w, h, 8);
+    // Zonas útiles por tipo. Alrededor de los ojos hay ojeras y sombras: ahí no se buscan manchas ni lunares.
+    var noseZone = zoneMask(NOSE_TIP_ZONE.map(pt), w * 0.06, w, h);
+    var eyeZone = zoneMask([pt(159), pt(145), pt(33), pt(133), pt(386), pt(374), pt(263), pt(362)], w * 0.09, w, h);
+    var eyeL = pt(145), eyeR = pt(374), noseTip = pt(4);
+    var miliumZone = function (x, y) { // pómulos, debajo de los ojos y hasta la altura de la nariz (no pegado al ojo)
+      var top = Math.max(eyeL[1], eyeR[1]) + w * 0.03, bottom = noseTip[1];
+      return y > top && y < bottom && !noseZone[(y | 0) * w + (x | 0)];
+    };
+    // Una máscara por tipo: si se usa un solo umbral bajo, un lunar se "funde" con la sombra de alrededor.
+    var nose = new Uint8Array(n), core = new Uint8Array(n), dark = new Uint8Array(n), red = new Uint8Array(n), light = new Uint8Array(n);
+    for (var p = 0; p < n; p++) {
+      if (!skin[p]) continue;
+      var dL = bgL[p] - L[p], dA = A[p] - bgA[p], chroma = Math.sqrt(A[p] * A[p] + B[p] * B[p]);
+      if (noseZone[p]) { if (dL >= R.blackhead.minDark) nose[p] = 1; }
+      else if (!eyeZone[p]) { if (dL >= R.mole.core) core[p] = 1; if (inner[p] > 0.98 && bgW[p] - Ls[p] >= R.stain.minDark) dark[p] = 1; }
+      if (dA >= R.pimple.minRed && dL < R.mole.minDark) red[p] = 1;
+      if (-dL >= R.milium.minLight && chroma < R.milium.maxChroma && L[p] < 97) light[p] = 1; // los reflejos (L≈100) no cuentan
+    }
+    var found = [], add = function (type, cmp) { found.push({ type: type, x: (cmp.cx / k + x0) / W, y: (cmp.cy / k + y0) / H, r: Math.max(3, Math.sqrt(cmp.area / Math.PI) * 1.8) / k / W }); };
+    var stats = function (cmp, bg, img) {
+      var dMax = 0, dSum = 0; bg = bg || bgL; img = img || L;
+      cmp.pixels.forEach(function (q) { var d = bg[q] - img[q]; dSum += d; if (d > dMax) dMax = d; });
+      return { dMax: dMax, dMean: dSum / Math.max(1, cmp.pixels.length), fill: cmp.area / Math.max(1, cmp.bw * cmp.bh),
+        elong: Math.max(cmp.bw, cmp.bh) / Math.max(1, Math.min(cmp.bw, cmp.bh)) };
+    };
+    components(nose, w, h, function (cmp) {
+      if (cmp.area <= R.blackhead.maxArea) add('punto_negro', cmp);
+    });
+    var moleAt = [];
+    components(core, w, h, function (cmp) {
+      var st = stats(cmp);
+      if (cmp.area >= R.mole.minArea && cmp.area <= R.mole.maxArea && st.dMax >= R.mole.minDark && st.fill >= R.mole.minFill && st.elong <= R.maxElongation) {
+        add('lunar', cmp); moleAt.push(cmp);
+      }
+    });
+    var stainCand = [];
+    components(dark, w, h, function (cmp) {
+      var st = stats(cmp, bgW, Ls);
+      if (cmp.area >= 40) stainCand.push([cmp.area, +st.dMean.toFixed(1), +st.fill.toFixed(2), +st.elong.toFixed(1)]);
+      if (moleAt.some(function (mo) { return Math.abs(mo.cx - cmp.cx) < cmp.bw / 2 + 2 && Math.abs(mo.cy - cmp.cy) < cmp.bh / 2 + 2; })) return; // es el halo de un lunar
+      if (cmp.area >= R.stain.minArea && cmp.area <= R.stain.maxArea && st.dMean >= R.stain.minDark && st.dMean <= R.stain.maxDark &&
+          st.fill >= R.stain.minFill && st.elong <= R.maxElongation) add('mancha', cmp);
+    });
+    components(red, w, h, function (cmp) {
+      var st = stats(cmp);
+      if (cmp.area >= R.pimple.minArea && cmp.area <= R.pimple.maxArea && st.fill >= R.pimple.minFill && st.elong <= R.maxElongation) add('grano', cmp);
+    });
+    components(light, w, h, function (cmp) {
+      if (cmp.area >= R.milium.minArea && cmp.area <= R.milium.maxArea && miliumZone(cmp.cx, cmp.cy)) add('milium', cmp);
+    });
+    var counts = { grano: 0, punto_negro: 0, milium: 0, lunar: 0, mancha: 0 };
+    found.forEach(function (f) { counts[f.type]++; });
+    stainCand.sort(function (a, b) { return b[0] - a[0]; });
+    return { spots: found, counts: counts, debug: { candidatosMancha: stainCand.slice(0, 5) } };
+  }
+  /** sRGB → CIELab (D65). */
+  function rgbToLab(r, g, b) {
+    function lin(v) { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    var R = lin(r), G = lin(g), B = lin(b);
+    var X = (R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047, Y = R * 0.2126 + G * 0.7152 + B * 0.0722, Z = (R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883;
+    function f(t) { return t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116; }
+    var fx = f(X), fy = f(Y), fz = f(Z);
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+  }
+  /** Promedio local que solo usa píxeles de piel (imagen integral). */
+  function maskedBlur(v, mask, w, h, r) {
+    var S = new Float64Array((w + 1) * (h + 1)), C = new Float64Array((w + 1) * (h + 1)), out = new Float32Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var rs = 0, rc = 0;
+      for (var x = 0; x < w; x++) {
+        var p = y * w + x; rs += mask[p] ? v[p] : 0; rc += mask[p];
+        S[(y + 1) * (w + 1) + x + 1] = S[y * (w + 1) + x + 1] + rs; C[(y + 1) * (w + 1) + x + 1] = C[y * (w + 1) + x + 1] + rc;
+      }
+    }
+    for (var yy = 0; yy < h; yy++) for (var xx = 0; xx < w; xx++) {
+      var xa = Math.max(0, xx - r), xb = Math.min(w, xx + r + 1), ya = Math.max(0, yy - r), yb = Math.min(h, yy + r + 1);
+      var s = S[yb * (w + 1) + xb] - S[ya * (w + 1) + xb] - S[yb * (w + 1) + xa] + S[ya * (w + 1) + xa];
+      var cc = C[yb * (w + 1) + xb] - C[ya * (w + 1) + xb] - C[yb * (w + 1) + xa] + C[ya * (w + 1) + xa];
+      out[yy * w + xx] = cc ? s / cc : v[yy * w + xx];
+    }
+    return out;
+  }
+  function zoneMask(pts, r, w, h) {
+    var z = new Uint8Array(w * h);
+    pts.forEach(function (p) {
+      for (var y = Math.max(0, (p[1] - r) | 0); y < Math.min(h, p[1] + r); y++) for (var x = Math.max(0, (p[0] - r) | 0); x < Math.min(w, p[0] + r); x++) {
+        if ((x - p[0]) * (x - p[0]) + (y - p[1]) * (y - p[1]) <= r * r) z[y * w + x] = 1;
+      }
+    });
+    return z;
+  }
+  /** Componentes conexos (4 vecinos) de una máscara; llama a fn con área, centro, caja y píxeles. */
+  function components(mask, w, h, fn) {
+    var seen = new Uint8Array(w * h);
+    for (var p = 0; p < w * h; p++) {
+      if (!mask[p] || seen[p]) continue;
+      var stack = [p], pixels = [], area = 0, minX = w, maxX = 0, minY = h, maxY = 0, sx = 0, sy = 0; seen[p] = 1;
+      while (stack.length) {
+        var q = stack.pop(), qx = q % w, qy = (q / w) | 0; area++; sx += qx; sy += qy;
+        if (area <= 3000) pixels.push(q); // regiones enormes (sombras) se recorren enteras y se descartan
+        if (qx < minX) minX = qx; if (qx > maxX) maxX = qx; if (qy < minY) minY = qy; if (qy > maxY) maxY = qy;
+        if (qx + 1 < w && mask[q + 1] && !seen[q + 1]) { seen[q + 1] = 1; stack.push(q + 1); }
+        if (qx > 0 && mask[q - 1] && !seen[q - 1]) { seen[q - 1] = 1; stack.push(q - 1); }
+        if (qy + 1 < h && mask[q + w] && !seen[q + w]) { seen[q + w] = 1; stack.push(q + w); }
+        if (qy > 0 && mask[q - w] && !seen[q - w]) { seen[q - w] = 1; stack.push(q - w); }
+      }
+      if (area > 3000) continue;
+      fn({ area: area, cx: sx / area, cy: sy / area, bw: maxX - minX + 1, bh: maxY - minY + 1, pixels: pixels });
+    }
+  }
+
   (function skinOrientation() {
     if (!CFG.AI_ANALYSIS_ENABLED) return;
     $('#analisis').hidden = false; $('#aiHeroLink').hidden = false; $('#aiHeroMicro').hidden = false;
@@ -709,7 +882,7 @@
       stopCamera();
       measured = measureSkin(shots);
       setMsg(shots.length > 1 ? '¡Listo! Tenemos tus fotos.' : '¡Listo! Tenemos tu foto.', true);
-      diag({ controles: shots.map(function (x) { return x.checks; }), indicadores: measured.metrics, hallazgos: measured.findings });
+      diag({ controles: shots.map(function (x) { return x.checks; }), indicadores: measured.metrics, hallazgos: measured.findings, detalle: measured.debug });
       $('#aiCamDone').hidden = false; $('#aiRetake').hidden = false; $('#aiSkipSides').hidden = true;
       Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
     }
@@ -841,16 +1014,22 @@
       });
       var avg = function (a) { return a.reduce(function (x, y) { return x + y; }, 0) / a.length; };
       var texA = avg(tex), cvA = avg(cv), poA = avg(pores);
+      var det = detectSpots(front.canvas, front.P), n = det.counts;
       var metrics = { fotos: list.length, brilloZonaT: +T.spec.toFixed(3), brilloMejillas: +C.spec.toFixed(3), rojezDif: +(C.red - T.red).toFixed(3),
-        texturaMejillas: +texA.toFixed(2), tonoMejillas: +cvA.toFixed(3), puntosNariz: +N.spots.toFixed(2), porosMejillas: +poA.toFixed(2) };
+        texturaMejillas: +texA.toFixed(2), tonoMejillas: +cvA.toFixed(3), puntosNariz: +N.spots.toFixed(2), porosMejillas: +poA.toFixed(2),
+        granos: n.grano, puntosNegros: n.punto_negro, milium: n.milium, lunares: n.lunar, manchas: n.mancha };
       if (T.spec >= R.shineT && C.spec >= R.shineGeneralC) f.push('brillo_general');
       else if (T.spec >= R.shineT && T.spec >= R.shineRatio * C.spec + 0.01) f.push('brillo_zona_t');
       if (texA >= R.texture) f.push('textura_irregular');
       if (cvA >= R.toneCv) f.push('tono_desparejo');
       if (C.red - T.red >= R.rednessDiff) f.push('enrojecimiento_visible');
-      if (N.spots >= R.noseSpots) f.push('puntos_negros_posibles');
+      if (N.spots >= R.noseSpots || n.punto_negro >= SPOT_RULES.blackhead.minCount) f.push('puntos_negros_posibles');
       if (poA >= R.cheekPores) f.push('poros_visibles_posibles');
-      return { findings: f, metrics: metrics };
+      if (n.grano) f.push('granos_posibles');
+      if (n.milium) f.push('milium_posible');
+      if (n.lunar) f.push('lunares_visibles');
+      if (n.mancha) f.push('manchas_posibles');
+      return { findings: f, metrics: metrics, spots: det.spots, debug: det.debug };
     }
 
     // 3. Cuestionario (4 preguntas; si no hubo foto, se suma la del brillo)
@@ -940,21 +1119,37 @@
       c.width = 280; c.height = Math.round(src.height * k);
       var x = c.getContext('2d'); x.save(); x.translate(c.width, 0); x.scale(-1, 1); x.drawImage(src, 0, 0, c.width, c.height); x.restore();
       var xs = P.map(function (p) { return p.x; }), r = (Math.max.apply(null, xs) - Math.min.apply(null, xs)) * c.width * 0.07;
-      function mark(ids, hit) {
+      function mark(ids, hit) { // zona medida: contorno fino; relleno suave si ahí se midió brillo, textura o tono
         ids.forEach(function (i) {
           x.beginPath(); x.arc((1 - P[i].x) * c.width, P[i].y * c.height, r, 0, Math.PI * 2);
-          x.lineWidth = 2; x.strokeStyle = hit ? '#f0b429' : 'rgba(255,255,255,.85)'; x.fillStyle = hit ? 'rgba(240,180,41,.25)' : 'rgba(255,255,255,.08)';
+          x.lineWidth = 1; x.strokeStyle = 'rgba(255,255,255,.6)'; x.fillStyle = hit ? 'rgba(255,255,255,.28)' : 'rgba(255,255,255,0)';
           x.fill(); x.stroke();
         });
       }
       var has = function (k2) { return findings.indexOf(k2) >= 0; };
       mark(ZONE_T, has('brillo_zona_t') || has('brillo_general'));
       mark(CHEEK_R.concat(CHEEK_L), has('textura_irregular') || has('tono_desparejo') || has('enrojecimiento_visible') || has('brillo_general') || has('poros_visibles_posibles'));
-      mark([48, 278], has('puntos_negros_posibles'));
+      // Elementos puntuales: cada marca está donde se detectó (no es un mapa inventado).
+      var used = {};
+      (measured && measured.spots || []).forEach(function (sp) {
+        var st = SPOT_STYLE[sp.type]; if (!st) return; used[sp.type] = true;
+        x.beginPath(); x.arc((1 - sp.x) * c.width, sp.y * c.height, Math.max(4, sp.r * c.width), 0, Math.PI * 2);
+        x.lineWidth = 2.5; x.strokeStyle = '#fff'; x.stroke(); // borde blanco para que se vea sobre cualquier tono de piel
+        x.lineWidth = 1.6; x.strokeStyle = st.color; x.setLineDash(sp.type === 'mancha' ? [3, 2] : []); x.stroke(); x.setLineDash([]);
+      });
       var fig = el('figure', 'ai-zones'); fig.appendChild(c);
-      fig.appendChild(el('figcaption', null, 'Zonas medidas en tu foto. En amarillo, donde se identificó algo.'));
+      var cap = el('figcaption', null, 'Círculos blancos: zonas medidas (más claros si se identificó brillo, textura o tono). Marcas de color: lo detectado.');
+      var leg = el('ul', 'ai-legend');
+      Object.keys(SPOT_STYLE).forEach(function (t) {
+        if (!used[t]) return;
+        var li = el('li'), dot = el('span', 'ai-legend-dot'); dot.style.borderColor = SPOT_STYLE[t].color;
+        li.appendChild(dot); li.appendChild(document.createTextNode(SPOT_STYLE[t].label)); leg.appendChild(li);
+      });
+      fig.appendChild(cap); if (leg.children.length) fig.appendChild(leg);
       return fig;
     }
+    var SPOT_STYLE = { grano: { color: '#e5484d', label: 'Posible grano' }, punto_negro: { color: '#1f1f1f', label: 'Posible punto negro' },
+      milium: { color: '#3b82f6', label: 'Posible milium' }, lunar: { color: '#8b5a2b', label: 'Lunar' }, mancha: { color: '#9b59b6', label: 'Posible mancha' } };
     function waSummary(r) {
       var obs = r.observations.map(function (o) { return o.text.replace(/\.$/, '').toLowerCase(); });
       return 'Hola, hice la evaluación de piel con IA en la web. Resultado orientativo: piel ' + r.profile.type.toLowerCase() + '.' +

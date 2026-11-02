@@ -13,9 +13,11 @@
 
 // Lo que el teléfono puede informar de la foto: categorías cerradas.
 var PHOTO_FINDINGS = ['brillo_zona_t', 'brillo_general', 'textura_irregular', 'tono_desparejo', 'enrojecimiento_visible',
-                      'puntos_negros_posibles', 'poros_visibles_posibles'];
+                      'puntos_negros_posibles', 'poros_visibles_posibles', 'granos_posibles', 'milium_posible',
+                      'lunares_visibles', 'manchas_posibles'];
 // Números medidos en el teléfono (se guardan redondeados, para calibrar los umbrales).
-var PHOTO_METRICS = ['fotos', 'brilloZonaT', 'brilloMejillas', 'rojezDif', 'texturaMejillas', 'tonoMejillas', 'puntosNariz', 'porosMejillas'];
+var PHOTO_METRICS = ['fotos', 'brilloZonaT', 'brilloMejillas', 'rojezDif', 'texturaMejillas', 'tonoMejillas', 'puntosNariz', 'porosMejillas',
+                     'granos', 'puntosNegros', 'milium', 'lunares', 'manchas'];
 
 function handleAnalyze_(cfg, body) {
   if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
@@ -24,7 +26,7 @@ function handleAnalyze_(cfg, body) {
   var answers = cleanAnswers_(body.answers);
   var photo = cleanPhoto_(body.photo);
 
-  var result = buildOrientation_(answers, photo ? photo.findings : [], photo ? 'analizada' : 'sin_foto');
+  var result = buildOrientation_(answers, photo ? photo.findings : [], photo ? 'analizada' : 'sin_foto', photo ? photo.metrics : null);
   result.photoMetrics = photo ? photo.metrics : null;
   logEvent_(cfg, body.requestId, 'analisis_piel', { foto: result.photo, reglas: result.rulesVersion }); // sin respuestas ni resultado
   try {

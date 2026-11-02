@@ -59,12 +59,16 @@
         var Q = 'cuestionario', F = 'foto', V = 'evaluación presencial', ph = b.photo, has = function (k) { return ph && ph.findings.indexOf(k) >= 0; };
         var TXT = { brillo_zona_t: 'Brillo concentrado en frente y nariz.', brillo_general: 'Brillo repartido en varias zonas del rostro.',
           textura_irregular: 'Textura irregular en las mejillas.', tono_desparejo: 'Tono desparejo en las mejillas.', enrojecimiento_visible: 'Mejillas más rojizas que la frente.',
-          puntos_negros_posibles: 'Posibles puntos negros en la nariz.', poros_visibles_posibles: 'Poros visibles en las mejillas, cerca de la nariz.' };
-        return delay({ ok: true, status: 'ok', example: true, rulesVersion: 'v2-2026-11', photo: ph ? 'analizada' : 'sin_foto', whatsapp: q.get('wa') || '',
+          puntos_negros_posibles: 'Posibles puntos negros en la nariz', poros_visibles_posibles: 'Poros visibles en las mejillas, cerca de la nariz.',
+          granos_posibles: 'Posibles granos o zonas inflamadas', milium_posible: 'Posibles quistes de milium (puntitos blancos) cerca de los ojos o en los pómulos',
+          lunares_visibles: 'Lunares visibles', manchas_posibles: 'Posibles manchas o zonas más oscuras' };
+        var CNT = { puntos_negros_posibles: 'puntosNegros', granos_posibles: 'granos', milium_posible: 'milium', lunares_visibles: 'lunares', manchas_posibles: 'manchas' };
+        var txt = function (k) { return CNT[k] ? TXT[k] + (ph.metrics[CNT[k]] ? ' (' + ph.metrics[CNT[k]] + ')' : '') + '.' : TXT[k]; };
+        return delay({ ok: true, status: 'ok', example: true, rulesVersion: 'v3-2026-11', photo: ph ? 'analizada' : 'sin_foto', whatsapp: q.get('wa') || '',
           photoLimits: ph ? 'Son mediciones de tus fotos: la luz, la cámara y la hora del día pueden cambiarlas. La profesional lo confirma en persona.' : '',
           profile: { type: 'Mixta', warning: '', origin: ph ? 'foto y cuestionario' : Q, rule: 'TIPO-04' },
           needs: [{ text: 'Posible sensibilidad: a veces tu piel reacciona con algunos productos.', origin: Q, rule: 'NEC-SENS-2' }],
-          observations: ph ? ph.findings.map(function (k) { return { text: TXT[k], origin: F, rule: 'OBS-' + k, beta: /_posibles$/.test(k) }; }) : [],
+          observations: ph ? ph.findings.map(function (k) { return { text: txt(k), origin: F, rule: 'OBS-' + k, beta: !!CNT[k] || /_posibles?$|_visibles$/.test(k) }; }) : [],
           benefits: [{ text: 'Despejar los puntos negros que la profesional considere aptos para extracción.', origin: Q, rule: 'BEN-PN' },
                      { text: 'Sensación de piel más limpia y con menos brillo después de la sesión. El brillo vuelve con los días.', origin: has('brillo_zona_t') || has('brillo_general') ? F : Q, rule: 'BEN-BRI' },
                      { text: 'Piel más suave al tacto.', origin: has('textura_irregular') ? F : Q, rule: 'BEN-TEX' }],
