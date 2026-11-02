@@ -146,7 +146,7 @@ function createEnv(opts = {}) {
   fs.readdirSync(dir).filter(f => f.endsWith('.gs')).sort().forEach(f => vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f }));
 
   Object.assign(state.props, {
-    LEAD_SECRET: 'test-secret-only-for-tests',
+    LEAD_SECRET: 'test-secret-only-for-tests', ENV: 'development',
     PRO_CALENDAR_ID: 'pro@cal', ROOM_CALENDAR_IDS: 'roomA@cal,roomB@cal', ROOM_LABELS: 'Consultorio A,Consultorio B',
     ...(opts.props || {})
   });

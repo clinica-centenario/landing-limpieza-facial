@@ -62,10 +62,12 @@ function checkCalendars() {
   });
 }
 
-/** Elimina eventos [TEST] creados por la landing en un rango (solo los creados por este sistema). */
+/**
+ * Elimina eventos [TEST] creados por la landing en un rango. Se puede correr en producción:
+ * solo toca eventos con la marca de origen de este sistema Y el prefijo [TEST].
+ */
 function cleanupTestEvents(daysAhead) {
   var cfg = getConfig();
-  if (cfg.ENV === 'production') throw new Error('Solo en development');
   var now = new Date(), until = new Date(now.getTime() + (daysAhead || 60) * 86400000);
   calendarIds_(cfg).forEach(function (cal) {
     var res = Calendar.Events.list(cal, { timeMin: now.toISOString(), timeMax: until.toISOString(), singleEvents: true,

@@ -17,7 +17,7 @@
  */
 var DEFAULT_CONFIG = {
   // ── Entorno ───────────────────────────────────────────────
-  ENV: 'development', // 'development' | 'production'. En development las filas llevan prefijo [TEST].
+  ENV: 'production', // 'development' | 'production'. En development las filas y eventos llevan prefijo [TEST].
 
   // ── Calendarios ───────────────────────────────────────────
   PRO_CALENDAR_ID: '',            // Opcional: calendario de la profesional. Vacío = no se cruza ni se escribe en él.
