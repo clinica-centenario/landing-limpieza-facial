@@ -5,7 +5,7 @@ Usa el camino de PRODUCCIÓN del front (API_URL y META_PIXEL_ID configurados), i
   - el script de Meta (stub que registra cada llamada a fbq).
 Uso: python3 -I tests/e2e_mobile.py <carpeta public> <carpeta de salida para capturas>
 """
-import json, sys, threading, http.server, functools, os
+import json, sys, threading, http.server, functools, os, re
 from datetime import datetime, timedelta, timezone
 from playwright.sync_api import sync_playwright
 
@@ -27,21 +27,24 @@ def serve():
 calls = []
 state = {"lead_fail_once": True, "book_conflict_once": True}
 
-def recommend(exclude=None, count=3):
-    """Igual que el servidor: los horarios libres más próximos, sin superponerse (lun a vie 9–21, 10:00 y 10:30 ocupados)."""
-    out, now = [], datetime.now(UY)
+BANDS = [("Primera hora de la tarde", 13 * 60, 15 * 60), ("Media tarde", 15 * 60, 18 * 60), ("Noche", 18 * 60, 21 * 60)]
+
+def recommend(page=0, exclude=None):
+    """Igual que el servidor: un horario por franja (el más próximo; page = los siguientes), lun a vie, 13:30 ocupado."""
+    now = datetime.now(UY)
+    buckets = [[] for _ in BANDS]
     d = now.date()
-    while len(out) < count:
+    for _ in range(21):
         if d.weekday() < 5:
-            for t in range(9 * 60, 20 * 60 + 1, 30):
+            for t in range(13 * 60, 20 * 60 + 1, 30):
                 st = datetime(d.year, d.month, d.day, t // 60, t % 60, tzinfo=UY)
                 iso = st.astimezone(timezone.utc).isoformat().replace("+00:00", ".000Z")
-                if st <= now or t in (600, 630) or iso == exclude: continue
-                if out and st < out[-1]["_end"]: continue
-                out.append({"start": iso, "date": d.isoformat(), "time": f"{t//60:02d}:{t%60:02d}", "soon": st <= now + timedelta(hours=24), "_end": st + timedelta(hours=1)})
-                if len(out) == count: break
+                if st <= now or t == 810 or iso == exclude: continue
+                for i, (label, a, b) in enumerate(BANDS):
+                    if a <= t < b: buckets[i].append({"start": iso, "date": d.isoformat(), "time": f"{t//60:02d}:{t%60:02d}", "soon": st <= now + timedelta(hours=24), "band": label})
         d += timedelta(days=1)
-    return [{k: v for k, v in s.items() if k != "_end"} for s in out]
+    out = sorted([b[page] for b in buckets if len(b) > page], key=lambda s: s["start"])
+    return out, any(len(b) > page + 1 for b in buckets)
 
 def api_handler(route, request):
     body = json.loads(request.post_data or "{}")
@@ -53,20 +56,22 @@ def api_handler(route, request):
             return route.abort("failed")  # fallo de red: el front debe conservar los datos
         res = {"ok": True, "requestId": "CC-261015-ABC123", "token": "t" * 40, "leadEventId": "lead_CC-261015-ABC123"}
     elif a == "availability":
-        res = {"ok": True, "timezone": "America/Montevideo", "slots": recommend(), "withinHours": 24, "durationMin": 60, "whatsapp": "59899123456"}
+        slots, more = recommend(body.get("page", 0))
+        res = {"ok": True, "timezone": "America/Montevideo", "page": body.get("page", 0), "slots": slots, "hasMore": more, "withinHours": 24, "durationMin": 60, "whatsapp": "59899123456"}
     elif a == "track":
         res = {"ok": True}
     elif a == "book":
         if state["book_conflict_once"]:
             state["book_conflict_once"] = False
-            alts = recommend(exclude=body["start"])
+            alts = recommend(exclude=body["start"])[0]
             res = {"ok": False, "code": "slot_unavailable", "alternatives": alts}
         else:
             st = datetime.fromisoformat(body["start"].replace("Z", "+00:00"))
             loc = st.astimezone(UY)
             res = {"ok": True, "bookingId": "RAB12CD34EF", "scheduleEventId": "schedule_RAB12CD34EF", "date": loc.date().isoformat(),
                    "time": loc.strftime("%H:%M"), "startIso": body["start"], "endIso": (st + timedelta(hours=1)).isoformat().replace("+00:00", ".000Z"),
-                   "durationMin": 60, "professional": "Lic. Jaqueline Mansilla", "address": "Av. Centenario 3090A, Montevideo", "timezone": "America/Montevideo"}
+                   "durationMin": 60, "professional": "Lic. Jaqueline Mansilla", "address": "Av. Centenario 3090A, Montevideo", "timezone": "America/Montevideo",
+                   "whatsapp": "59899123456", "emailSent": True}
     else:
         res = {"ok": False, "code": "invalid_request"}
     import time; time.sleep(0.4)
@@ -91,7 +96,9 @@ with sync_playwright() as p:
     ctx = br.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale="es-UY", timezone_id="Europe/Madrid")
     # Zona horaria del navegador distinta a propósito: la agenda tiene que mostrar hora de Montevideo igual.
     ctx.route("**/config.js", lambda r: r.fulfill(status=200, content_type="text/javascript",
-        body=open(os.path.join(PUBLIC, "config.js")).read().replace("API_URL: ''", f"API_URL: '{API}'").replace("META_PIXEL_ID: ''", "META_PIXEL_ID: '000000000000000'")))
+        body=re.sub(r"API_URL: '[^']*'", f"API_URL: '{API}'", open(os.path.join(PUBLIC, "config.js")).read()).replace("META_PIXEL_ID: ''", "META_PIXEL_ID: '000000000000000'")))
+    # Nunca llegar al backend real, aunque config.js apunte a producción.
+    ctx.route("https://script.google.com/**", lambda r: r.abort())
     ctx.route(API, api_handler)
     ctx.route("**/fbevents.js", lambda r: r.fulfill(status=200, content_type="text/javascript", body=FBQ_STUB))
     ctx.route(lambda u: ("fonts.g" in u) or ("clinicacentenario.com.uy" in u), lambda r: r.abort())
@@ -150,14 +157,21 @@ with sync_playwright() as p:
     check("agenda solo después de guardar", calls.index(lead_calls[-1]) < [i for i, c in enumerate(calls) if c.get("action") == "availability"][0])
     check("vio_horarios una vez", names(page).count("vio_horarios") == 1)
 
-    # Tres horarios recomendados, en hora de Montevideo aunque el navegador esté en Madrid
-    expected = recommend()
+    # Un horario por franja, en hora de Montevideo aunque el navegador esté en Madrid
+    expected, _ = recommend()
     shown = page.eval_on_selector_all(".rec .rt", "els => els.map(e => e.textContent)")
-    check("muestra 3 horarios recomendados", len(shown) == 3, shown)
+    check("muestra un horario por franja (tarde, media tarde, noche)", len(shown) == 3 and sorted(page.eval_on_selector_all(".rec .rl", "e => e.map(x => x.textContent)")) == sorted(b[0] for b in BANDS), shown)
     check("horarios en hora UY con navegador en Madrid", all(sh.startswith(ex["time"]) for sh, ex in zip(shown, expected)), (shown, [e["time"] for e in expected]))
     check("marca los de las próximas 24 h", page.locator(".rec .rb").count() == sum(1 for e in expected if e["soon"]))
+    check("en el reservador no hay botón de WhatsApp", not page.is_visible("#waLink") and not page.is_visible("#noneFit"))
+    page.click("#moreSlots"); page.wait_for_function("document.querySelectorAll('.rec').length && !document.querySelector('.skeleton')")
+    nxt, _ = recommend(1)
+    check("ver otros horarios: siguientes de cada franja", page.eval_on_selector_all(".rec", "e => e.map(x => x.dataset.start)") == [s["start"] for s in nxt])
+    page.click("#noneFit")
     wa = page.get_attribute("#waLink", "href") or ""
-    check("WhatsApp si ninguno sirve", page.is_visible("#waHelp") and wa.startswith("https://wa.me/59899123456?text=") and "CC-261015-ABC123" in wa, wa)
+    check("no me sirven → otra pantalla con WhatsApp", page.is_visible("#waPanel") and not page.is_visible("#slots") and wa.startswith("https://wa.me/59899123456?text=") and "CC-261015-ABC123" in wa, wa)
+    page.click("#waBack"); page.click("#prevSlots"); page.wait_for_function("!document.querySelector('.skeleton')")
+    check("volver a los anteriores", page.eval_on_selector_all(".rec", "e => e.map(x => x.dataset.start)") == [s["start"] for s in expected])
     check("agenda sin scroll horizontal", page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
     page.locator("#booking").scroll_into_view_if_needed()
     page.screenshot(path=f"{OUT}/05-agenda-mobile.png")
@@ -186,6 +200,9 @@ with sync_playwright() as p:
     summary = page.inner_text("#summary")
     check("confirmación con fecha, hora, profesional, duración y dirección",
           all(x in summary for x in ["Jaqueline Mansilla", "60 minutos", "Av. Centenario 3090A", "hora de Montevideo"]), summary)
+    pay = page.get_attribute("#payWa", "href") or ""
+    check("paso 4: pagar por WhatsApp con la reserva", page.is_visible("#payWa") and "RAB12CD34EF" in pay, pay)
+    check("aviso de correo enviado y sin botón de descarga", page.is_visible("#mailNote") and page.query_selector("#icsLink") is None)
     check("idempotencyKey enviada", all(len(c.get("idempotencyKey", "")) >= 16 for c in calls if c.get("action") == "book"))
     page.screenshot(path=f"{OUT}/08-confirmada.png", full_page=False)
 

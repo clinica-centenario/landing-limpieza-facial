@@ -137,22 +137,37 @@ function crossAvailability_(cfg, candidates, busyMap) {
 }
 
 /**
- * Elige los horarios a ofrecer: los más próximos, sin superponerse entre sí,
- * empezando por los que caen dentro de RECOMMEND_WITHIN_HOURS.
- * Como la lista viene ordenada por inicio, los de las próximas 24 h quedan primero.
+ * Arma una "página" de opciones: un horario por franja (primera hora de la tarde, media tarde, noche),
+ * el más próximo en cada una. La página 1 trae el segundo más próximo de cada franja, y así.
+ * Si una franja no tiene horario, se completa con otros horarios libres (p. ej. de mañana).
+ * @return {slots:[slot+{band}], hasMore:boolean}
  */
-function pickRecommended_(cfg, slots, now, excludeIso) {
+function pickByBands_(cfg, slots, now, page, excludeIso) {
   var soonLimit = now.getTime() + cfg.RECOMMEND_WITHIN_HOURS * 3600000;
+  var buckets = cfg.BAND_LIST.map(function () { return []; }), others = [];
+  slots.forEach(function (s) {
+    if (excludeIso && s.start.toISOString() === excludeIso) return;
+    var t = parseHm_(s.time);
+    var i = -1;
+    cfg.BAND_LIST.some(function (b, j) { if (t >= b.from && t < b.to) { i = j; return true; } return false; });
+    (i >= 0 ? buckets[i] : others).push(s);
+  });
   var picked = [];
-  for (var i = 0; i < slots.length && picked.length < cfg.RECOMMEND_COUNT; i++) {
-    var s = slots[i];
-    if (excludeIso && s.start.toISOString() === excludeIso) continue;
-    var clash = picked.some(function (p) { return overlaps_(p.start, p.end, s.start, s.end); });
-    if (clash) continue;
-    s.soon = s.start.getTime() <= soonLimit;
-    picked.push(s);
-  }
-  return picked;
+  buckets.forEach(function (list, i) {
+    var s = list[page];
+    if (s) picked.push(withBand_(s, cfg.BAND_LIST[i].label, soonLimit));
+  });
+  var missing = cfg.RECOMMEND_COUNT - picked.length;
+  var fillFrom = page * cfg.RECOMMEND_COUNT;
+  others.slice(fillFrom, fillFrom + Math.max(missing, 0)).forEach(function (s) { picked.push(withBand_(s, '', soonLimit)); });
+  picked.sort(function (a, b) { return a.start - b.start; }); // se muestran en orden de fecha y hora
+  var hasMore = buckets.some(function (list) { return list.length > page + 1; }) ||
+                others.length > (page + 1) * cfg.RECOMMEND_COUNT;
+  return { slots: picked, hasMore: hasMore };
+}
+
+function withBand_(s, label, soonLimit) {
+  return { start: s.start, end: s.end, date: s.date, time: s.time, rooms: s.rooms, band: label, soon: s.start.getTime() <= soonLimit };
 }
 
 // ── Lectura de Google Calendar ──────────────────────────────
@@ -193,10 +208,11 @@ function computeAvailability_(cfg, fromYmd, days, now) {
 function calendarIds_(cfg) { return [cfg.PRO_CALENDAR_ID].concat(cfg.ROOM_CALENDAR_LIST).filter(Boolean); }
 
 /**
- * Recomendación: busca desde hoy en tramos de MAX_DAYS_PER_QUERY días hasta juntar
- * RECOMMEND_COUNT horarios o llegar al horizonte de reserva.
+ * Recomendación por franjas: busca desde hoy en tramos de MAX_DAYS_PER_QUERY días hasta que cada
+ * franja tenga un horario más allá de la página pedida (para saber si hay "siguientes") o hasta el horizonte.
  */
-function recommendSlots_(cfg, now, excludeIso) {
+function recommendSlots_(cfg, now, page, excludeIso) {
+  page = Math.max(0, Math.min(Number(page) || 0, 20));
   var lp = localParts_(now, cfg.TIMEZONE);
   var from = { y: lp.y, m: lp.m, d: lp.d };
   var chunk = Math.max(1, cfg.MAX_DAYS_PER_QUERY);
@@ -205,8 +221,12 @@ function recommendSlots_(cfg, now, excludeIso) {
     var r = computeAvailability_(cfg, addDaysYmd_(from, offset), chunk, now);
     anyError = anyError || r.calendarErrors;
     found = found.concat(r.slots);
-    var picked = pickRecommended_(cfg, found, now, excludeIso);
-    if (picked.length >= cfg.RECOMMEND_COUNT) return { slots: picked, calendarErrors: anyError };
+    var enough = cfg.BAND_LIST.every(function (b) {
+      return found.filter(function (s) { var t = parseHm_(s.time); return t >= b.from && t < b.to; }).length > page + 1;
+    });
+    if (enough) break;
   }
-  return { slots: pickRecommended_(cfg, found, now, excludeIso), calendarErrors: anyError };
+  var res = pickByBands_(cfg, found, now, page, excludeIso);
+  res.calendarErrors = anyError;
+  return res;
 }

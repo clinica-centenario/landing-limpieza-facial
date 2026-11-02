@@ -36,6 +36,10 @@ var DEFAULT_CONFIG = {
   MAX_DAYS_PER_QUERY: 7,
   RECOMMEND_WITHIN_HOURS: 24,     // se priorizan horarios dentro de esta ventana
   RECOMMEND_COUNT: 3,             // cuántos horarios se le ofrecen a la persona
+  // Franjas del día en que se ofrece un horario cada una (HH:MM-HH:MM, por hora de inicio).
+  BAND_EARLY_AFTERNOON: '13:00-15:00', // primera hora de la tarde
+  BAND_MID_AFTERNOON: '15:00-18:00',   // media tarde
+  BAND_EVENING: '18:00-21:00',         // noche
   WHATSAPP_NUMBER: '',            // contacto si ningún horario le sirve (con código de país, sin +)
 
   // ── Servicio y precios ────────────────────────────────────
@@ -47,9 +51,14 @@ var DEFAULT_CONFIG = {
   CONSENT_VERSION: 'v1-2026-10',
 
   // ── Contenido de los eventos de calendario ────────────────
-  // El evento del consultorio NUNCA lleva datos del paciente.
-  // El evento de la profesional lleva nombre y celular para que pueda contactar.
+  // Título del consultorio: "J - LF - Nombre Apellido - N" (profesional - servicio - cliente - N nueva / R recurrente).
+  // La descripción lleva nombre, celular y correo de la persona.
+  EVENT_PRO_CODE: 'J',
+  EVENT_SERVICE_CODE: 'LF',
   PRO_EVENT_INCLUDES_CONTACT: true,
+
+  // ── Correo de confirmación a la persona ───────────────────
+  CONFIRMATION_EMAIL_ENABLED: true,
 
   // ── Planilla ──────────────────────────────────────────────
   SHEET_ID: '',                   // Lo completa setupSheet() en Propiedades del script (no pegar acá)
@@ -62,7 +71,7 @@ var DEFAULT_CONFIG = {
 
   // ── Análisis de piel con IA (opcional) ────────────────────
   // Requiere además el secreto ANTHROPIC_API_KEY en Propiedades del script.
-  AI_ENABLED: false,
+  AI_ENABLED: true,               // sin ANTHROPIC_API_KEY la landing informa que no está disponible
   AI_MODEL: 'claude-sonnet-5-5',
   AI_MAX_PER_HOUR: 60,            // tope global por hora (control de costo)
   AI_MAX_PER_DAY: 300,            // tope global por día
@@ -77,7 +86,14 @@ var DEFAULT_CONFIG = {
 
 /** Parámetros que el equipo puede cambiar desde la pestaña Configuración. */
 var SHEET_KEYS_ = ['DURATION_MIN', 'SLOT_STEP_MIN', 'MIN_NOTICE_HOURS', 'HORIZON_DAYS', 'RECOMMEND_WITHIN_HOURS',
-                   'RECOMMEND_COUNT', 'BUFFER_BEFORE_MIN', 'BUFFER_AFTER_MIN', 'WHATSAPP_NUMBER'];
+                   'RECOMMEND_COUNT', 'BUFFER_BEFORE_MIN', 'BUFFER_AFTER_MIN', 'WHATSAPP_NUMBER',
+                   'BAND_EARLY_AFTERNOON', 'BAND_MID_AFTERNOON', 'BAND_EVENING'];
+var TEXT_SHEET_KEYS_ = ['WHATSAPP_NUMBER', 'BAND_EARLY_AFTERNOON', 'BAND_MID_AFTERNOON', 'BAND_EVENING'];
+var BAND_DEFS_ = [
+  { key: 'BAND_EARLY_AFTERNOON', label: 'Primera hora de la tarde' },
+  { key: 'BAND_MID_AFTERNOON', label: 'Media tarde' },
+  { key: 'BAND_EVENING', label: 'Noche' }
+];
 
 /**
  * Configuración efectiva: planilla (solo SHEET_KEYS_) > Propiedades del script > DEFAULT_CONFIG.
@@ -103,9 +119,21 @@ function getConfig() {
   if (!(cfg.SLOT_STEP_MIN > 0)) cfg.SLOT_STEP_MIN = DEFAULT_CONFIG.SLOT_STEP_MIN;
   if (!(cfg.RECOMMEND_COUNT > 0)) cfg.RECOMMEND_COUNT = DEFAULT_CONFIG.RECOMMEND_COUNT;
   cfg.WHATSAPP_NUMBER = cfg.WHATSAPP_NUMBER.replace(/\D/g, '');
+  cfg.BAND_LIST = BAND_DEFS_.map(function (b) {
+    var r = parseBand_(cfg[b.key]) || parseBand_(DEFAULT_CONFIG[b.key]);
+    return { label: b.label, from: r.from, to: r.to };
+  });
   cfg.WEEKLY = sheet.weekly;
   cfg.CLOSED_DATE_LIST = sheet.closed;
   return cfg;
+}
+
+/** "13:00-15:00" → {from, to} en minutos, o null. */
+function parseBand_(s) {
+  var p = String(s || '').split(/\s*(?:-|–|a)\s*/);
+  if (p.length !== 2) return null;
+  var from = parseSheetTime_(p[0]), to = parseSheetTime_(p[1]);
+  return (from !== null && to !== null && to > from) ? { from: from, to: to } : null;
 }
 
 function splitList_(s) {

@@ -154,7 +154,44 @@
         </div>
 
         <div class="card ai-tool" aria-live="polite">
-          <div id="aiPick">
+          <form id="aiLead" novalidate>
+            <p class="ai-step">Paso 1 de 2 · Tus datos</p>
+            <div class="field-row">
+              <div class="field">
+                <label for="a-firstName">Nombre</label>
+                <input id="a-firstName" name="firstName" autocomplete="given-name" required maxlength="60" aria-describedby="ea-firstName">
+                <p class="err" id="ea-firstName" hidden>Escribí tu nombre.</p>
+              </div>
+              <div class="field">
+                <label for="a-lastName">Apellido</label>
+                <input id="a-lastName" name="lastName" autocomplete="family-name" required maxlength="60" aria-describedby="ea-lastName">
+                <p class="err" id="ea-lastName" hidden>Escribí tu apellido.</p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="a-phone">Celular</label>
+              <input id="a-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="09X XXX XXX" required maxlength="20" aria-describedby="ea-phone">
+              <p class="err" id="ea-phone" hidden>Ingresá un celular uruguayo, por ejemplo 099 123 456.</p>
+            </div>
+            <div class="field">
+              <label for="a-email">Correo electrónico</label>
+              <input id="a-email" name="email" type="email" inputmode="email" autocomplete="email" required maxlength="120" aria-describedby="ea-email">
+              <p class="err" id="ea-email" hidden>Revisá el correo electrónico.</p>
+            </div>
+            <div class="hp" aria-hidden="true">
+              <label for="a-website">No completar</label>
+              <input id="a-website" name="website" tabindex="-1" autocomplete="off">
+            </div>
+            <div class="field check">
+              <input id="a-consent" name="consent" type="checkbox" required aria-describedby="ea-consent">
+              <label for="a-consent">Acepto que Clínica Centenario use estos datos para gestionar mi consulta y reserva. <a href="#privacidad">Aviso de privacidad</a></label>
+              <p class="err" id="ea-consent" hidden>Necesitamos tu aceptación para continuar.</p>
+            </div>
+            <button class="btn btn-block" type="submit" id="aiLeadBtn">Continuar</button>
+            <p class="form-status" id="aiLeadStatus" role="status"></p>
+          </form>
+          <div id="aiPick" hidden>
+            <p class="ai-step">Paso 2 de 2 · Tu foto</p>
             <label class="ai-drop" for="aiFile" id="aiDrop">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.4-2h4.6l1.4 2h1.8A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.6"/></svg>
               <span class="ai-drop-title">Sacá o subí una foto</span>
@@ -301,6 +338,7 @@
             <li class="is-active" data-step="1"><span>1</span>Tus datos</li>
             <li data-step="2"><span>2</span>Horario</li>
             <li data-step="3"><span>3</span>Confirmación</li>
+            <li data-step="4"><span>4</span>Pago</li>
           </ol>
 
           <!-- Paso 1: datos -->
@@ -350,13 +388,14 @@
           <!-- Paso 2: horarios -->
           <div class="panel" data-panel="2" hidden>
             <h3 class="panel-title">Elegí tu horario</h3>
-            <p class="tz-note">Estos son los horarios libres más próximos. Hora de Montevideo, sesión de 60 minutos.</p>
+            <p class="tz-note">Te proponemos un horario a primera hora de la tarde, otro a media tarde y otro de noche. Hora de Montevideo, sesión de 60 minutos.</p>
             <div class="recs" id="slots" role="radiogroup" aria-label="Horarios recomendados"></div>
             <div class="slot-state" id="slotState" role="status"></div>
-            <div class="wa-help" id="waHelp" hidden>
-              <p>¿Ninguno de estos horarios te sirve?</p>
-              <a class="btn btn-ghost btn-block" id="waLink" target="_blank" rel="noopener">Escribinos por WhatsApp</a>
+            <div class="rec-nav" id="recNav" hidden>
+              <button type="button" class="btn btn-ghost btn-sm" id="prevSlots" hidden>Volver a los anteriores</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="moreSlots" hidden>Ver otros horarios</button>
             </div>
+            <button type="button" class="link-btn" id="noneFit" hidden>No me sirven estos horarios</button>
 
             <div class="confirm-box" id="confirmBox" hidden>
               <p class="confirm-when" id="confirmWhen"></p>
@@ -367,19 +406,31 @@
             <p class="form-status" id="bookStatus" role="status"></p>
           </div>
 
+          <!-- Ningún horario le sirve: contacto por WhatsApp -->
+          <div class="panel" data-panel="wa" hidden tabindex="-1" id="waPanel">
+            <h3 class="panel-title">Coordinemos tu horario</h3>
+            <p>Escribinos por WhatsApp y buscamos juntos un horario que te quede cómodo. Tus datos ya quedaron guardados.</p>
+            <a class="btn btn-block" id="waLink" target="_blank" rel="noopener">Escribinos por WhatsApp</a>
+            <p class="form-status" id="waStatus" role="status"></p>
+            <button type="button" class="btn btn-ghost btn-block" id="waBack">Volver a los horarios</button>
+          </div>
+
           <!-- Paso 3: confirmación -->
           <div class="panel" data-panel="3" hidden tabindex="-1" id="donePanel">
             <div class="done-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 12.5 4 4 8-9"/></svg></div>
             <h3 class="panel-title">¡Tu reserva está confirmada!</h3>
             <dl class="summary" id="summary"></dl>
-            <div class="pay-note">
-              <p><strong>Reserva confirmada no es pago confirmado.</strong> El precio de $1.824 aplica si se concreta el pago anticipado; si no, el precio es de $2.280.</p>
+            <p class="mail-note" id="mailNote" hidden></p>
+            <div class="pay-step">
+              <p class="pay-step-title"><span class="pay-step-n">4</span>Último paso: pagá tu consulta</p>
+              <p>Con pago anticipado el precio es <strong>$1.824</strong> (precio de lista $2.280). Escribinos por WhatsApp y te pasamos los datos para pagar.</p>
               <p id="payAfter" hidden></p>
+              <a class="btn btn-block" id="payWa" target="_blank" rel="noopener" hidden>Pagar consulta por WhatsApp</a>
+              <p class="fine" id="payNoWa" hidden>Te vamos a contactar para coordinar el pago.</p>
             </div>
             <p class="fine" id="cancelPolicy" hidden></p>
             <div class="cal-links">
               <a class="btn btn-ghost" id="gcalLink" target="_blank" rel="noopener">Agregar a Google Calendar</a>
-              <a class="btn btn-ghost" id="icsLink" download="limpieza-facial-clinica-centenario.ics">Descargar evento (.ics)</a>
             </div>
           </div>
         </div>

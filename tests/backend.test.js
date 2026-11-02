@@ -157,22 +157,35 @@ test('agenda: margen entre sesiones configurable', () => {
   assert.ok(!times.includes('11:00') && !times.includes('13:00') && times.includes('10:30') && times.includes('13:30'));
 });
 
-test('recomendación: 3 horarios sin superponerse, priorizando las próximas 24 h', () => {
+test('recomendación: un horario por franja (primera hora de la tarde, media tarde, noche), el más próximo', () => {
   const env = mk({ props: { ROOM_CALENDAR_IDS: 'roomA@cal', PRO_CALENDAR_ID: '' } });
-  env.state.cals['roomA@cal'] = [ev('r', '09:00', '10:30')];
+  env.state.cals['roomA@cal'] = [ev('r', '13:00', '14:00')];
   const r = avail(env, lead(env));
-  assert.equal(r.ok, true); assert.equal(r.timezone, TZ); assert.equal(r.withinHours, 24);
-  assert.deepEqual(r.slots.map(s => s.date + ' ' + s.time), [MON + ' 10:30', MON + ' 11:30', MON + ' 12:30']);
-  assert.ok(r.slots.every(s => s.soon), 'los tres dentro de las próximas 24 h');
+  assert.equal(r.ok, true); assert.equal(r.timezone, TZ); assert.equal(r.page, 0); assert.equal(r.hasMore, true);
+  assert.deepEqual(r.slots.map(s => s.band + ' ' + s.date + ' ' + s.time),
+    ['Primera hora de la tarde ' + MON + ' 14:00', 'Media tarde ' + MON + ' 15:00', 'Noche ' + MON + ' 18:00']);
+  assert.ok(r.slots.every(s => s.soon), 'dentro de las próximas 24 h');
 });
 
-test('recomendación: sin lugar en 24 h recomienda igual los más próximos', () => {
+test('recomendación: "ver otros horarios" trae los siguientes de cada franja; las franjas salen de la planilla', () => {
   const env = mk({ props: { ROOM_CALENDAR_IDS: 'roomA@cal', PRO_CALENDAR_ID: '' } });
-  env.setHours([['Jueves', '15:00', '17:00']]);
+  const l = lead(env);
+  const p1 = env.post({ action: 'availability', requestId: l.requestId, token: l.token, page: 1 });
+  assert.deepEqual(p1.slots.map(s => s.time), ['13:30', '15:30', '18:30']);
+  env.setParam('BAND_EVENING', '19:00-21:00'); env.state.cache = {};
+  const p0 = avail(env, l);
+  assert.equal(p0.slots[2].time, '19:00');
+});
+
+test('recomendación: si las franjas de la tarde no tienen lugar, completa con otros horarios libres', () => {
+  const env = mk({ props: { ROOM_CALENDAR_IDS: 'roomA@cal', PRO_CALENDAR_ID: '' } });
+  env.setHours([['Jueves', '09:00', '13:00']]);
   const r = avail(env, lead(env));
   const thu = plusDays(MON, 3);
-  assert.deepEqual(r.slots.map(s => s.date + ' ' + s.time), [thu + ' 15:00', thu + ' 16:00', plusDays(thu, 7) + ' 15:00'], 'busca en la semana siguiente');
+  assert.deepEqual(r.slots.map(s => s.date + ' ' + s.time + ' ' + s.band), [thu + ' 09:00 ', thu + ' 09:30 ', thu + ' 10:00 ']);
   assert.ok(r.slots.every(s => !s.soon));
+  const next = env.post({ action: 'availability', requestId: r.requestId, token: 'x', page: 1 });
+  assert.equal(next.code, 'invalid_token');
 });
 
 test('recomendación: sin franjas cargadas no ofrece horarios y devuelve el WhatsApp de la planilla', () => {
@@ -187,18 +200,40 @@ test('sin calendario de la profesional: se agenda solo el consultorio, sin datos
   const env = mk({ props: { PRO_CALENDAR_ID: '', ROOM_CALENDAR_IDS: 'roomA@cal', ROOM_LABELS: 'Con 3 - Camilla 1' } });
   env.state.cals['pro@cal'] = [ev('p', '09:00', '21:00')]; // no se consulta
   const l = lead(env);
-  assert.equal(avail(env, l).slots[0].time, '09:00');
   const r = book(env, l, '09:00', key(30));
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(env.state.cals['pro@cal'].length, 1, 'no se escribió en el calendario de la profesional');
   const re = env.state.cals['roomA@cal'][0];
-  assert.ok(!/Ana|Pérez/.test(re.summary + re.description));
+  assert.equal(re.summary, '[TEST] J - LF - Ana Pérez - N');
   const row = contactRow(env, l.requestId);
   assert.equal(row['Estado reserva'], 'Reserva confirmada'); assert.equal(row['Consultorio'], 'Con 3 - Camilla 1');
   assert.equal(book(env, l, '09:00', key(30)).replay, true, 'reintento idempotente sin calendario de profesional');
   const other = lead(env, { email: 'b@example.com', phone: '098765432' });
   const rb = book(env, other, '09:00', key(31));
-  assert.equal(rb.code, 'slot_unavailable'); assert.ok(rb.alternatives.length && rb.alternatives[0].time !== '09:00');
+  assert.equal(rb.code, 'slot_unavailable'); assert.ok(rb.alternatives.length && rb.alternatives.every(s => s.start !== at('09:00').toISOString()));
+});
+
+test('reserva: correo de confirmación con el paso de pago por WhatsApp; recurrente = R', () => {
+  const env = mk({ props: { PRO_CALENDAR_ID: '', ROOM_CALENDAR_IDS: 'roomA@cal' } });
+  env.setParam('WHATSAPP_NUMBER', '59899111222');
+  const l = lead(env);
+  const r = book(env, l, '14:00', key(40));
+  assert.equal(r.ok, true); assert.equal(r.emailSent, true); assert.equal(r.whatsapp, '59899111222');
+  const m = env.state.mails[0];
+  assert.equal(m.to, 'ana@example.com'); assert.match(m.subject, /Reserva confirmada/);
+  assert.match(m.htmlBody, /wa\.me\/59899111222/); assert.match(m.htmlBody, new RegExp(r.bookingId));
+  assert.equal(book(env, l, '14:00', key(40)).replay, true); assert.equal(env.state.mails.length, 1, 'el reintento no reenvía el correo');
+  const again = lead(env);
+  assert.equal(book(env, again, '16:00', key(41)).ok, true);
+  assert.match(env.state.cals['roomA@cal'].find(e => e.start.dateTime === at('16:00').toISOString()).summary, / - R$/, 'misma persona con reserva previa');
+});
+
+test('reserva: si falla el correo la reserva queda igual', () => {
+  const env = mk({ props: { PRO_CALENDAR_ID: '', ROOM_CALENDAR_IDS: 'roomA@cal' } });
+  env.state.failMail = true;
+  const l = lead(env); const r = book(env, l, '14:00', key(42));
+  assert.equal(r.ok, true); assert.equal(r.emailSent, false);
+  assert.ok(env.state.sheets['Eventos'].some(x => x[2] === 'error_correo_confirmacion'));
 });
 
 test('reserva: crea ambos eventos con el mismo ID de reserva y actualiza la MISMA fila', () => {
@@ -211,8 +246,8 @@ test('reserva: crea ambos eventos con el mismo ID de reserva y actualiza la MISM
   const pe = env.state.cals['pro@cal'][0], re = env.state.cals['roomA@cal'][0];
   assert.equal(pe.extendedProperties.private.bookingId, r.bookingId);
   assert.equal(re.extendedProperties.private.bookingId, r.bookingId);
-  assert.ok(!/Ana/.test(re.summary + re.description), 'el consultorio no lleva datos del paciente');
-  assert.match(re.summary, /^\[TEST\] Jaqueline Mansilla - Limpieza facial/);
+  assert.equal(re.summary, '[TEST] J - LF - Ana Pérez - N', 'nomenclatura: profesional - servicio - cliente - nueva');
+  assert.match(re.description, /Celular: \+59899123456/); assert.match(re.description, /Correo: ana@example.com/);
   const rows = env.state.sheets['Contactos'];
   assert.equal(rows.length, 2, 'sin fila nueva');
   const row = contactRow(env, l.requestId);

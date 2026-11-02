@@ -116,7 +116,7 @@ function createEnv(opts = {}) {
   const state = {
     cals: {}, sheets: {}, props: {}, cache: {},
     noAccess: new Set(), failInsert: new Set(), failDelete: new Set(), failSheetWrite: false,
-    afterInsert: null, locked: false, calls: { freebusy: 0, insert: 0 }, logs: []
+    afterInsert: null, locked: false, calls: { freebusy: 0, insert: 0 }, logs: [], mails: [], failMail: false
   };
   const ctx = {
     console: { log: () => {}, warn: (m) => state.logs.push(m), error: (m) => state.logs.push(m) },
@@ -137,6 +137,7 @@ function createEnv(opts = {}) {
       computeDigest: (alg, t) => toSigned(crypto.createHash('sha256').update(t, 'utf8').digest()),
       DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' }, sleep: () => {}
     },
+    MailApp: { sendEmail: (m) => { if (state.failMail) throw new Error('Service invoked too many times: email'); state.mails.push(m); } },
     UrlFetchApp: { fetch: (url, o) => { state.logs.push('fetch ' + url.split('?')[0]); return { getContentText: () => '{"success":true}' }; } },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (s) => ({ setMimeType: () => ({ body: JSON.parse(s) }) }) },
     Logger: { log: (m) => state.logs.push(m) }

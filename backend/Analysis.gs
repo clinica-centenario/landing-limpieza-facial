@@ -5,6 +5,8 @@
  *  - Orientación COSMÉTICA, no diagnóstico. No se nombran enfermedades.
  *  - La foto NO se guarda en ningún lado (ni Sheets, ni Drive, ni logs). Solo se envía al proveedor de IA para responder.
  *  - Solo mayores de 18 con consentimiento explícito.
+ *  - Primero se guardan los datos de contacto (lead): el resultado queda en la pestaña "Análisis de piel"
+ *    vinculado a esa solicitud, y si después reserva no se le vuelven a pedir los datos.
  *  - Si se observa algo que amerita consulta médica, se recomienda consultar, sin nombrar la condición.
  *
  * Requiere: AI_ENABLED=true y el secreto ANTHROPIC_API_KEY en Propiedades del script.
@@ -63,6 +65,7 @@ var AI_TOOL_SCHEMA = {
 function handleAnalyze_(cfg, body) {
   var key = getSecret_('ANTHROPIC_API_KEY');
   if (!cfg.AI_ENABLED || !key) return fail_('ai_not_configured');
+  if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
   if (body.consent !== true || body.adult !== true) return fail_('consent_required');
   if (!verifyTurnstile_(body.turnstileToken)) return fail_('captcha_failed');
 
@@ -81,7 +84,13 @@ function handleAnalyze_(cfg, body) {
 
   var result = sanitizeAnalysis_(resp);
   if (!result) return fail_('ai_error');
-  logEvent_(cfg, '', 'analisis_piel', { status: result.status }); // sin resultado ni datos de la persona
+  logEvent_(cfg, body.requestId, 'analisis_piel', { status: result.status }); // sin resultado ni datos de la persona
+  if (result.status === 'ok') {
+    try {
+      var contact = readContact_(cfg, String(body.requestId));
+      if (contact) appendAnalysis_(cfg, contact, result);
+    } catch (e) { console.warn('No se pudo guardar el análisis: ' + shortErr_(e)); }
+  }
   result.ok = true;
   return result;
 }

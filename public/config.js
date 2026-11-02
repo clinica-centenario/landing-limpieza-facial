@@ -44,8 +44,8 @@ window.CC_CONFIG = {
   PRIVACY_CONTACT: '',
 
   // Análisis de piel con IA. Requiere AI_ENABLED y ANTHROPIC_API_KEY en el script.
-  // false = la sección no se muestra. Apagado hasta la etapa del análisis (guardará en la pestaña "Análisis de piel").
-  AI_ANALYSIS_ENABLED: false,
+  // false = la sección no se muestra. Pide los datos antes de la foto y guarda el resultado en la pestaña "Análisis de piel".
+  AI_ANALYSIS_ENABLED: true,
 
   // Reseñas reales. Vacío = el bloque NO se muestra. Formato: { text, author, date }
   // No cargar reseñas inventadas, editadas sin permiso ni puntajes que no existan.

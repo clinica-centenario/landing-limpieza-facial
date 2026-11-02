@@ -119,8 +119,10 @@
   function endTime(startIso, min) { return fmt(new Date(new Date(startIso).getTime() + min * 60000), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); }
 
   // ── Stepper ───────────────────────────────────────────────
-  function goStep(n) {
-    $$('[data-panel]').forEach(function (p) { p.hidden = +p.getAttribute('data-panel') !== n; });
+  // n = panel a mostrar (1, 2, 3 o 'wa'); step = paso resaltado en el indicador (por defecto, n).
+  function goStep(n, step) {
+    $$('[data-panel]').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== String(n); });
+    n = typeof step === 'number' ? step : n;
     $$('.stepper li').forEach(function (li) {
       var s = +li.getAttribute('data-step');
       li.classList.toggle('is-active', s === n); li.classList.toggle('is-done', s < n);
@@ -133,15 +135,8 @@
   }
   function status(el, msg, kind) { el.textContent = msg || ''; el.className = 'form-status' + (kind ? ' is-' + kind : ''); }
 
-  // ── Paso 1: formulario ────────────────────────────────────
-  var form = $('#leadForm'), leadBtn = $('#leadBtn'), leadStatus = $('#leadStatus');
+  // ── Datos de contacto (reserva y análisis de piel usan la misma solicitud) ──
   var session = store.get('sessionStorage', 'cc_lead'); // { requestId, token, leadEventId }
-  var submitKey = null, lastSubmitFingerprint = null, sending = false;
-
-  form.addEventListener('focusin', function once() {
-    Track.send('formulario_abierto', { dedupeKey: 'formulario_abierto:' + PAGE_LOADED_AT });
-    form.removeEventListener('focusin', once);
-  });
 
   function normalizePhone(raw) {
     var d = String(raw || '').replace(/[^\d+]/g, '');
@@ -154,115 +149,129 @@
   function validName(s) { s = s.replace(/\s+/g, ' ').trim(); return /^[A-Za-zÀ-ÖØ-öø-ÿÑñ' .\-]+$/.test(s) && s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÑñ]/g, '').length >= 2; }
   function validEmail(s) { return /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[a-z]{2,}$/i.test(s.trim()); }
 
-  function showErr(field, show) {
-    var input = $('#f-' + field), err = $('#e-' + field);
-    if (input) input.setAttribute('aria-invalid', show ? 'true' : 'false');
-    if (err) err.hidden = !show;
+  /**
+   * Formulario de datos mínimos. Guarda en el servidor antes de seguir; un reintento con los
+   * mismos datos reutiliza la clave de envío y no crea otra solicitud.
+   * o: { form, btn, statusEl, p (prefijo de inputs), e (prefijo de errores), origin, marketing, onSaved }
+   */
+  function bindLeadForm(o) {
+    var submitKey = null, lastFp = null, sending = false;
+    var fields = ['firstName', 'lastName', 'phone', 'email'];
+    function input(f) { return $('#' + o.p + '-' + f); }
+    function showErr(field, show) {
+      var el = input(field), err = $('#' + o.e + '-' + field);
+      if (el) el.setAttribute('aria-invalid', show ? 'true' : 'false');
+      if (err) err.hidden = !show;
+    }
+    o.form.addEventListener('focusin', function once() {
+      Track.send('formulario_abierto', { dedupeKey: 'formulario_abierto:' + PAGE_LOADED_AT });
+      o.form.removeEventListener('focusin', once);
+    });
+    fields.forEach(function (f) {
+      input(f).addEventListener('blur', function () {
+        var v = this.value; if (!v) return;
+        showErr(f, !(f === 'phone' ? normalizePhone(v) : f === 'email' ? validEmail(v) : validName(v)));
+      });
+      input(f).addEventListener('input', function () { if (this.getAttribute('aria-invalid') === 'true') showErr(f, false); });
+    });
+    input('consent').addEventListener('change', function () { if (this.checked) showErr('consent', false); });
+
+    o.form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (sending) return; // evita doble envío
+      var v = {}; fields.forEach(function (f) { v[f] = input(f).value; }); v.consent = input('consent').checked;
+      var marketing = !!(o.marketing && o.marketing.checked);
+      var bad = { firstName: !validName(v.firstName), lastName: !validName(v.lastName), phone: !normalizePhone(v.phone), email: !validEmail(v.email), consent: !v.consent };
+      Object.keys(bad).forEach(function (k) { showErr(k, bad[k]); });
+      var firstBad = fields.concat('consent').filter(function (k) { return bad[k]; })[0];
+      if (firstBad) { input(firstBad).focus(); status(o.statusEl, 'Revisá los datos marcados.', 'error'); return; }
+
+      // Misma combinación de datos → misma clave: un reintento no crea otra solicitud.
+      var fp = [v.firstName.trim(), v.lastName.trim(), normalizePhone(v.phone), v.email.trim().toLowerCase(), marketing].join('|');
+      if (fp !== lastFp) { submitKey = 'sub_' + uid(); lastFp = fp; }
+
+      sending = true; setBusy(o.btn, true, 'Guardando tus datos…'); status(o.statusEl, '');
+      var tsInput = $('input[name="cf-turnstile-response"]');
+      api('lead', Object.assign({
+        firstName: v.firstName, lastName: v.lastName, phone: v.phone, email: v.email, origin: o.origin, consent: true, marketing: marketing,
+        website: input('website').value, elapsedMs: Date.now() - PAGE_LOADED_AT, submitKey: submitKey,
+        pageUrl: landingUrl, utm: utm, consentVersion: CFG.CONSENT_VERSION,
+        turnstileToken: tsInput ? tsInput.value : ''
+      }, Track.serverHints())).then(function (res) {
+        sending = false; setBusy(o.btn, false);
+        if (res.ok) {
+          session = { requestId: res.requestId, token: res.token, leadEventId: res.leadEventId };
+          store.set('sessionStorage', 'cc_lead', session);
+          // Lead SOLO cuando el servidor confirmó el guardado.
+          Track.send('Lead', { eventID: res.leadEventId, dedupeKey: 'Lead:' + res.requestId });
+          status(o.statusEl, 'Datos guardados.', 'ok');
+          o.onSaved();
+          return;
+        }
+        if (res.code === 'validation' && res.errors) {
+          Object.keys(res.errors).forEach(function (k) { showErr(k, true); });
+          status(o.statusEl, 'Revisá los datos marcados.', 'error'); return;
+        }
+        var msgs = {
+          too_fast: 'Revisá tus datos y volvé a tocar «Continuar».',
+          rate_limited: 'Recibimos varios intentos seguidos. Esperá unos minutos y probá de nuevo.',
+          captcha_failed: 'No pudimos verificar el formulario. Probá de nuevo.',
+          not_configured: 'Este servicio todavía no está habilitado. Probá más tarde.',
+          network: 'No pudimos guardar tus datos por un problema de conexión. Tus datos siguen acá: tocá «Continuar» para reintentar.'
+        };
+        status(o.statusEl, msgs[res.code] || 'No pudimos guardar tus datos. Tus datos siguen acá: probá de nuevo en un momento.', 'error');
+      });
+    });
   }
-  ['firstName', 'lastName', 'phone', 'email'].forEach(function (f) {
-    $('#f-' + f).addEventListener('blur', function () {
-      var v = this.value; if (!v) return;
-      showErr(f, !(f === 'phone' ? normalizePhone(v) : f === 'email' ? validEmail(v) : validName(v)));
-    });
-    $('#f-' + f).addEventListener('input', function () { if (this.getAttribute('aria-invalid') === 'true') showErr(f, false); });
-  });
-  $('#f-consent').addEventListener('change', function () { if (this.checked) showErr('consent', false); });
 
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    if (sending) return; // evita doble envío
-    var v = { firstName: $('#f-firstName').value, lastName: $('#f-lastName').value, phone: $('#f-phone').value, email: $('#f-email').value, consent: $('#f-consent').checked };
-    var bad = { firstName: !validName(v.firstName), lastName: !validName(v.lastName), phone: !normalizePhone(v.phone), email: !validEmail(v.email), consent: !v.consent };
-    Object.keys(bad).forEach(function (k) { showErr(k, bad[k]); });
-    var firstBad = ['firstName', 'lastName', 'phone', 'email', 'consent'].filter(function (k) { return bad[k]; })[0];
-    if (firstBad) { $('#f-' + firstBad).focus(); status(leadStatus, 'Revisá los datos marcados.', 'error'); return; }
-
-    // Misma combinación de datos → misma clave: un reintento no crea otra solicitud.
-    var fp = [v.firstName.trim(), v.lastName.trim(), normalizePhone(v.phone), v.email.trim().toLowerCase(), $('#f-marketing').checked].join('|');
-    if (fp !== lastSubmitFingerprint) { submitKey = 'sub_' + uid(); lastSubmitFingerprint = fp; }
-
-    sending = true; setBusy(leadBtn, true, 'Guardando tus datos…'); status(leadStatus, '');
-    var tsInput = $('input[name="cf-turnstile-response"]');
-    api('lead', Object.assign({
-      firstName: v.firstName, lastName: v.lastName, phone: v.phone, email: v.email, origin: 'reserva', consent: true, marketing: $('#f-marketing').checked,
-      website: $('#f-website').value, elapsedMs: Date.now() - PAGE_LOADED_AT, submitKey: submitKey,
-      pageUrl: landingUrl, utm: utm, consentVersion: CFG.CONSENT_VERSION,
-      turnstileToken: tsInput ? tsInput.value : ''
-    }, Track.serverHints())).then(function (res) {
-      sending = false; setBusy(leadBtn, false);
-      if (res.ok) {
-        session = { requestId: res.requestId, token: res.token, leadEventId: res.leadEventId };
-        store.set('sessionStorage', 'cc_lead', session);
-        // Lead SOLO cuando el servidor confirmó el guardado.
-        Track.send('Lead', { eventID: res.leadEventId, dedupeKey: 'Lead:' + res.requestId });
-        status(leadStatus, 'Datos guardados.', 'ok');
-        startScheduling();
-        return;
-      }
-      if (res.code === 'validation' && res.errors) {
-        Object.keys(res.errors).forEach(function (k) { showErr(k, true); });
-        status(leadStatus, 'Revisá los datos marcados.', 'error'); return;
-      }
-      var msgs = {
-        too_fast: 'Revisá tus datos y volvé a tocar «Continuar».',
-        rate_limited: 'Recibimos varios intentos seguidos. Esperá unos minutos y probá de nuevo.',
-        captcha_failed: 'No pudimos verificar el formulario. Probá de nuevo.',
-        not_configured: 'La reserva online todavía no está habilitada. Probá más tarde.',
-        network: 'No pudimos guardar tus datos por un problema de conexión. Tus datos siguen acá: tocá «Continuar» para reintentar.'
-      };
-      status(leadStatus, msgs[res.code] || 'No pudimos guardar tus datos. Tus datos siguen acá: probá de nuevo en un momento.', 'error');
-    });
-  });
+  var leadStatus = $('#leadStatus');
+  bindLeadForm({ form: $('#leadForm'), btn: $('#leadBtn'), statusEl: leadStatus, p: 'f', e: 'e', origin: 'reserva',
+    marketing: $('#f-marketing'), onSaved: function () { startScheduling(); } });
 
   // ── Paso 2: horarios recomendados ─────────────────────────
-  // El servidor devuelve los horarios libres más próximos (priorizando las próximas 24 h).
-  // Si ninguno le sirve, la persona escribe por WhatsApp.
+  // El servidor ofrece un horario por franja (primera hora de la tarde, media tarde, noche).
+  // "Ver otros horarios" pide los siguientes; "No me sirven" lleva a otra pantalla con WhatsApp.
   var todayYmd = localYmd(new Date());
-  var state = { slots: [], slot: null, durationMin: 60, idem: {}, booking: false };
+  var state = { slots: [], slot: null, page: 0, hasMore: false, durationMin: 60, whatsapp: '', idem: {}, booking: false, loaded: false };
   var slotsEl = $('#slots'), slotState = $('#slotState'), confirmBox = $('#confirmBox'), bookBtn = $('#bookBtn'), bookStatus = $('#bookStatus');
 
   function startScheduling() {
     goStep(2);
-    loadRecommendations();
+    loadRecommendations(0);
     var b = $('#booking'); if (b.getBoundingClientRect().top < 0) b.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function renderSkeleton() {
     slotsEl.innerHTML = '';
     for (var i = 0; i < 3; i++) { var s = document.createElement('div'); s.className = 'skeleton'; slotsEl.appendChild(s); }
-    slotState.textContent = ''; confirmBox.hidden = true;
+    slotState.textContent = ''; confirmBox.hidden = true; $('#recNav').hidden = true; $('#noneFit').hidden = true;
   }
 
-  function setWhatsApp(number) {
-    var n = String(number || CFG.WHATSAPP_NUMBER || '').replace(/\D/g, '');
-    $('#waHelp').hidden = !n;
-    if (!n) return;
-    var msg = 'Hola, quiero reservar una limpieza facial profunda y ninguno de los horarios de la web me sirve.' +
-      (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '');
-    $('#waLink').href = 'https://wa.me/' + n + '?text=' + encodeURIComponent(msg);
-  }
+  function waNumber() { return String(state.whatsapp || CFG.WHATSAPP_NUMBER || '').replace(/\D/g, ''); }
+  function waUrl(msg) { var n = waNumber(); return n ? 'https://wa.me/' + n + '?text=' + encodeURIComponent(msg) : ''; }
 
-  function loadRecommendations() {
-    state.slot = null;
+  function loadRecommendations(page) {
+    state.slot = null; state.loaded = true;
     renderSkeleton();
-    return api('availability', { requestId: session.requestId, token: session.token })
+    return api('availability', { requestId: session.requestId, token: session.token, page: page })
       .then(function (res) {
         if (!res.ok) return availabilityError(res);
+        state.page = res.page || 0; state.hasMore = !!res.hasMore;
         state.durationMin = res.durationMin || 60;
-        setWhatsApp(res.whatsapp);
+        state.whatsapp = res.whatsapp || '';
         renderRecommendations(res.slots || []);
         if (state.slots.length) Track.send('vio_horarios', { dedupeKey: 'vio_horarios:' + session.requestId });
       });
   }
 
   function availabilityError(res) {
-    slotsEl.innerHTML = ''; setWhatsApp('');
-    if (res.code === 'invalid_token') { store.del('sessionStorage', 'cc_lead'); session = null; goStep(1); status(leadStatus, 'Tu sesión venció. Volvé a tocar «Continuar y ver horarios».', 'error'); return; }
+    slotsEl.innerHTML = '';
+    if (res.code === 'invalid_token') { store.del('sessionStorage', 'cc_lead'); session = null; state.loaded = false; goStep(1); status(leadStatus, 'Tu sesión venció. Volvé a tocar «Continuar y ver horarios».', 'error'); return; }
     if (res.code === 'calendar_not_configured' || res.code === 'not_configured') { slotState.textContent = 'Tus datos quedaron guardados, pero la agenda online todavía no está habilitada. Te vamos a contactar para coordinar tu horario.'; return; }
     slotState.innerHTML = '';
     slotState.appendChild(document.createTextNode('No pudimos cargar los horarios. '));
     var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Reintentar';
-    b.onclick = loadRecommendations; slotState.appendChild(b);
+    b.onclick = function () { loadRecommendations(state.page); }; slotState.appendChild(b);
   }
 
   /** "Hoy", "Mañana" o "Jueves 6 de noviembre". */
@@ -275,9 +284,14 @@
   function renderRecommendations(list) {
     state.slots = list;
     slotsEl.innerHTML = ''; confirmBox.hidden = true; status(bookStatus, '');
-    slotState.textContent = list.length ? '' : 'Por ahora no hay horarios libres para reservar online.' + ($('#waHelp').hidden ? ' Tus datos quedaron guardados y te vamos a contactar.' : '');
+    slotState.textContent = list.length ? '' : (state.page > 0 ? 'No encontramos más horarios libres.' : 'Por ahora no hay horarios libres para reservar online.');
     list.forEach(function (s, i) { slotsEl.appendChild(slotButton(s, i === 0)); });
     rovingKeys(slotsEl, '.rec');
+    $('#moreSlots').hidden = !state.hasMore;
+    $('#prevSlots').hidden = state.page === 0;
+    $('#recNav').hidden = $('#moreSlots').hidden && $('#prevSlots').hidden;
+    // "No me sirven" aparece después de ver otras opciones, o si no hay más para ofrecer.
+    $('#noneFit').hidden = state.page === 0 && state.hasMore;
   }
 
   function slotButton(s, focusable) {
@@ -287,11 +301,12 @@
     b.setAttribute('aria-checked', String(!!sel)); b.tabIndex = (sel || (!state.slot && focusable)) ? 0 : -1;
     b.dataset.start = s.start;
     var txt = document.createElement('span');
+    if (s.band) { var l = document.createElement('span'); l.className = 'rl'; l.textContent = s.band; txt.appendChild(l); }
     var d = document.createElement('span'); d.className = 'rd'; d.textContent = dayLabel(s.date);
     var t = document.createElement('span'); t.className = 'rt'; t.textContent = s.time + ' a ' + endTime(s.start, state.durationMin) + ' h';
     txt.appendChild(d); txt.appendChild(t); b.appendChild(txt);
     if (s.soon) { var badge = document.createElement('span'); badge.className = 'rb'; badge.textContent = 'Próximas 24 h'; b.appendChild(badge); }
-    b.setAttribute('aria-label', longDate(s.date) + ', ' + s.time + ' a ' + endTime(s.start, state.durationMin) + ', hora de Montevideo');
+    b.setAttribute('aria-label', (s.band ? s.band + ': ' : '') + longDate(s.date) + ', ' + s.time + ' a ' + endTime(s.start, state.durationMin) + ', hora de Montevideo');
     b.addEventListener('click', function () { selectSlot(s); });
     return b;
   }
@@ -306,6 +321,38 @@
     confirmBox.hidden = false; status(bookStatus, '');
     if (window.matchMedia('(max-width: 899px)').matches) confirmBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
+
+  /** Con los datos ya guardados (p. ej. desde el análisis de piel) la reserva arranca en el paso 2,
+   *  y los horarios se piden recién cuando la persona llega a esa sección. */
+  function prepareScheduling() {
+    goStep(2); state.loaded = false;
+    renderSkeleton();
+    var booking = $('#booking');
+    if (!('IntersectionObserver' in window)) return loadRecommendations(0);
+    var io = new IntersectionObserver(function (e) {
+      if (!e[0].isIntersecting) return;
+      io.disconnect();
+      if (!state.loaded && session) loadRecommendations(0);
+    });
+    io.observe(booking);
+  }
+
+  $('#payWa').addEventListener('click', function () { Track.send('pagar_whatsapp', { dedupeKey: 'pagar_whatsapp:' + PAGE_LOADED_AT }); });
+  $('#moreSlots').addEventListener('click', function () { loadRecommendations(state.page + 1); });
+  $('#prevSlots').addEventListener('click', function () { loadRecommendations(Math.max(0, state.page - 1)); });
+
+  // Pantalla aparte: ningún horario le sirve → WhatsApp
+  $('#noneFit').addEventListener('click', function () {
+    var url = waUrl('Hola, quiero reservar una limpieza facial profunda y ninguno de los horarios de la web me sirve.' +
+      (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : ''));
+    $('#waLink').hidden = !url;
+    if (url) $('#waLink').href = url;
+    status($('#waStatus'), url ? '' : 'Tus datos quedaron guardados: te vamos a contactar para coordinar el horario.', url ? '' : 'ok');
+    Track.send('ningun_horario_sirve', { dedupeKey: 'ningun_horario_sirve:' + session.requestId });
+    goStep('wa', 2);
+    $('#waPanel').focus({ preventScroll: true });
+  });
+  $('#waBack').addEventListener('click', function () { goStep(2); });
 
   function rovingKeys(container, sel) {
     container.onkeydown = function (e) {
@@ -341,6 +388,7 @@
 
   function showAlternatives(alts) {
     var lost = state.slot;
+    state.page = 0; state.hasMore = true;
     renderRecommendations(alts);
     var p = document.createElement('p'); p.style.margin = '0';
     p.textContent = 'El horario de las ' + lost.time + ' se acaba de ocupar. ' + (alts.length ? 'Estos siguen libres:' : 'Por ahora no quedan otros horarios online.');
@@ -353,7 +401,7 @@
     // Schedule SOLO con la reserva confirmada por el servidor.
     Track.send('Schedule', { eventID: b.scheduleEventId, dedupeKey: 'Schedule:' + b.bookingId });
     store.set('sessionStorage', 'cc_booking', b);
-    goStep(3);
+    goStep(3, 4); // reserva confirmada; queda el paso 4: pago
     var dl = $('#summary'); dl.innerHTML = '';
     [['Fecha', longDate(b.date)], ['Hora', b.time + ' a ' + endTime(b.startIso, b.durationMin) + ' (hora de Montevideo)'], ['Profesional', b.professional],
      ['Duración', b.durationMin + ' minutos'], ['Dirección', b.address], ['N.º de reserva', b.bookingId]].forEach(function (r) {
@@ -364,10 +412,12 @@
     var z = function (iso) { return iso.replace(/[-:]/g, '').replace(/\.\d{3}/, ''); };
     $('#gcalLink').href = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(title) +
       '&dates=' + z(b.startIso) + '/' + z(b.endIso) + '&details=' + encodeURIComponent(details) + '&location=' + encodeURIComponent(b.address) + '&ctz=' + encodeURIComponent(TZ);
-    var ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Clinica Centenario//Reserva//ES', 'BEGIN:VEVENT', 'UID:' + b.bookingId + '@clinicacentenario.com.uy',
-      'DTSTAMP:' + z(new Date().toISOString()), 'DTSTART:' + z(b.startIso), 'DTEND:' + z(b.endIso), 'SUMMARY:' + title, 'DESCRIPTION:' + details,
-      'LOCATION:' + b.address.replace(/,/g, '\\,'), 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
-    $('#icsLink').href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }));
+    if (b.emailSent) { $('#mailNote').textContent = 'Te enviamos la confirmación a tu correo.'; $('#mailNote').hidden = false; }
+    // Paso 4: pagar la consulta por WhatsApp, con la reserva ya escrita en el mensaje.
+    if (b.whatsapp) state.whatsapp = b.whatsapp;
+    var pay = waUrl('Hola, quiero pagar mi reserva ' + b.bookingId + ' de limpieza facial del ' + longDate(b.date).toLowerCase() + ' a las ' + b.time + ' h.');
+    $('#payWa').hidden = !pay; $('#payNoWa').hidden = !!pay;
+    if (pay) $('#payWa').href = pay;
     if (CFG.PAYMENT && CFG.PAYMENT.confirmed && CFG.PAYMENT.instructionsAfterBooking) { $('#payAfter').textContent = CFG.PAYMENT.instructionsAfterBooking; $('#payAfter').hidden = false; }
     if (CFG.CANCELLATION_POLICY) { $('#cancelPolicy').textContent = CFG.CANCELLATION_POLICY; $('#cancelPolicy').hidden = false; }
     if (opts && opts.restore) return;
@@ -430,7 +480,23 @@
   // La foto se reduce y se re-codifica en el dispositivo (sin EXIF ni GPS) y no se guarda en ningún almacenamiento.
   (function aiAnalysis() {
     if (!CFG.AI_ANALYSIS_ENABLED) return;
+    // La sección aparece solo si el servidor tiene el análisis listo (clave de IA cargada).
+    var ready = DEMO ? Promise.resolve(true) : !CFG.API_URL ? Promise.resolve(false) :
+      fetch(CFG.API_URL).then(function (r) { return r.json(); }).then(function (j) { return !!j.aiReady; }).catch(function () { return false; });
+    ready.then(function (ok) { if (ok) aiInit(); });
+  })();
+
+  function aiInit() {
     $('#analisis').hidden = false; $('#aiHeroLink').hidden = false;
+    // Paso 1: datos de contacto (la misma solicitud sirve para reservar sin volver a cargarlos).
+    var aiLead = $('#aiLead');
+    function showPhotoStep() { aiLead.hidden = true; $('#aiPick').hidden = false; }
+    if (session) showPhotoStep();
+    bindLeadForm({ form: aiLead, btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
+      onSaved: function () {
+        showPhotoStep(); $('#aiPick').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (!store.get('sessionStorage', 'cc_booking')) prepareScheduling();
+      } });
     var fileIn = $('#aiFile'), drop = $('#aiDrop'), prev = $('#aiPreview'), prevImg = $('#aiPreviewImg');
     var btn = $('#aiBtn'), st = $('#aiStatus'), pick = $('#aiPick'), out = $('#aiResult');
     var photo = null, busy = false;
@@ -475,12 +541,16 @@
       if (!$('#aiAdult').checked || !$('#aiConsent').checked) { status(st, 'Marcá las dos casillas para continuar.', 'error'); return; }
       busy = true; setBusy(btn, true, 'Analizando tu foto…'); status(st, 'Puede demorar unos segundos.');
       var tsInput = $('input[name="cf-turnstile-response"]');
-      api('analyze', { image: photo, mediaType: 'image/jpeg', consent: true, adult: true, clientId: cid, turnstileToken: tsInput ? tsInput.value : '' }, 60000)
+      api('analyze', { image: photo, mediaType: 'image/jpeg', consent: true, adult: true, clientId: cid, requestId: session && session.requestId, token: session && session.token, turnstileToken: tsInput ? tsInput.value : '' }, 60000)
         .then(function (r) {
           busy = false; setBusy(btn, false);
           if (r.ok && r.status === 'ok') { photo = null; Track.send('analisis_piel', { dedupeKey: 'analisis_piel:' + PAGE_LOADED_AT }); return render(r); }
           if (r.ok && r.status === 'retry') { status(st, (r.retry_reason || 'Probá con otra foto.') + ' Elegí otra foto y volvé a intentar.', 'error'); return; }
           if (r.ok && r.status === 'not_allowed') { reset(); status(st, 'Este análisis es solo para mayores de 18 años, con una foto de tu propia cara.', 'error'); return; }
+          if (r.code === 'invalid_token') {
+            store.del('sessionStorage', 'cc_lead'); session = null; aiLead.hidden = false; pick.hidden = true;
+            status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos para analizar la foto.', 'error'); return;
+          }
           var msgs = {
             rate_limited: 'Llegaste al máximo de análisis por ahora. Probá más tarde o reservá tu evaluación con la profesional.',
             ai_not_configured: 'El análisis todavía no está disponible. Podés reservar tu sesión igual.',
@@ -523,7 +593,7 @@
       pick.hidden = true; out.hidden = false; out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  })();
+  }
 
   // ── Videos: los clips cortos se reproducen sin sonido solo mientras están en pantalla ──
   (function videos() {
@@ -575,5 +645,5 @@
   Track.init();
   var prevBooking = store.get('sessionStorage', 'cc_booking');
   if (session && prevBooking) showDone(prevBooking, { restore: true });
-  else if (session) { goStep(2); loadRecommendations(); }
+  else if (session) { goStep(2); loadRecommendations(0); }
 })();

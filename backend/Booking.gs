@@ -72,8 +72,9 @@ function bookSlot_(cfg, body, now) {
         return fail_('calendar_error');
       }
     }
+    var clientCode = clientCodeFor_(cfg, requestId, contact);
     try {
-      insertEvent_(room, buildRoomEvent_(cfg, requestId, bookingId, slot, room, evR));
+      insertEvent_(room, buildRoomEvent_(cfg, contact, requestId, bookingId, slot, room, evR, clientCode));
     } catch (e) {
       logEvent_(cfg, requestId, 'error_evento_consultorio', { msg: shortErr_(e) });
       return created.length ? rollback_(cfg, requestId, bookingId, created, 'calendar_error') : fail_('calendar_error');
@@ -89,7 +90,9 @@ function bookSlot_(cfg, body, now) {
       return rb;
     }
 
-    return ok_(finalize_(cfg, requestId, bookingId, slot, room, pro ? evP : '', evR, false));
+    var done = finalize_(cfg, requestId, bookingId, slot, room, pro ? evP : '', evR, false);
+    done.emailSent = sendConfirmationEmail_(cfg, contact, done);
+    return ok_(done);
   } finally {
     lock.releaseLock();
   }
@@ -116,6 +119,7 @@ function finalize_(cfg, requestId, bookingId, slot, room, evP, evR, replay) {
   }
   if (!replay) {
     logEvent_(cfg, requestId, 'reserva_confirmada', { bookingId: bookingId, date: date, time: time });
+    markAnalysisBooked_(cfg, requestId);
   }
   return {
     bookingId: bookingId,
@@ -128,6 +132,9 @@ function finalize_(cfg, requestId, bookingId, slot, room, evP, evR, replay) {
     professional: cfg.PROFESSIONAL_NAME,
     address: cfg.ADDRESS,
     timezone: cfg.TIMEZONE,
+    whatsapp: cfg.WHATSAPP_NUMBER,
+    prepaidPrice: cfg.PREPAID_PRICE_UYU,
+    listPrice: cfg.LIST_PRICE_UYU,
     replay: !!replay,
     sheetSynced: sheetOk
   };
@@ -148,6 +155,9 @@ function confirmationFromContact_(cfg, c, replay) {
     professional: cfg.PROFESSIONAL_NAME,
     address: cfg.ADDRESS,
     timezone: cfg.TIMEZONE,
+    whatsapp: cfg.WHATSAPP_NUMBER,
+    prepaidPrice: cfg.PREPAID_PRICE_UYU,
+    listPrice: cfg.LIST_PRICE_UYU,
     replay: replay,
     sheetSynced: true
   };
@@ -168,8 +178,7 @@ function rollback_(cfg, requestId, bookingId, created, codeIfClean) {
 }
 
 function buildProEvent_(cfg, contact, requestId, bookingId, slot, room, id) {
-  var name = [contact['Nombre'], contact['Apellido']].map(function (v) { return String(v || '').replace(/^'/, ''); })
-    .join(' ').replace(/^\[TEST\] /, '').trim();
+  var name = contactName_(contact);
   var test = cfg.ENV === 'production' ? '' : '[TEST] ';
   var desc = [
     'Servicio: ' + cfg.SERVICE_NAME + ' (' + cfg.DURATION_MIN + ' min)',
@@ -194,18 +203,43 @@ function buildProEvent_(cfg, contact, requestId, bookingId, slot, room, id) {
   };
 }
 
-/** Evento del consultorio: SIN datos del paciente. Empieza con el nombre de la profesional (convención de facturación). */
-function buildRoomEvent_(cfg, requestId, bookingId, slot, room, id) {
+function contactName_(contact) {
+  return [contact['Nombre'], contact['Apellido']].map(function (v) { return String(v || '').replace(/^'/, ''); })
+    .join(' ').replace(/^\[TEST\] /, '').trim();
+}
+
+/** N = clienta nueva para la landing; R = ya tuvo una reserva confirmada con el mismo email o celular. */
+function clientCodeFor_(cfg, requestId, contact) {
+  var clean = function (v) { return String(v == null ? '' : v).replace(/^'/, ''); };
+  try { return hasPriorBooking_(cfg, requestId, clean(contact['Email']), clean(contact['Celular'])) ? 'R' : 'N'; }
+  catch (e) { return 'N'; }
+}
+
+/**
+ * Evento del consultorio. Título con la nomenclatura de la clínica:
+ * "J - LF - Nombre Apellido - N" (profesional - servicio - cliente - N nueva / R recurrente).
+ * La descripción lleva los datos de contacto de la persona.
+ */
+function buildRoomEvent_(cfg, contact, requestId, bookingId, slot, room, id, clientCode) {
   var test = cfg.ENV === 'production' ? '' : '[TEST] ';
-  var pro = cfg.PROFESSIONAL_NAME.replace(/^Lic\.\s*/, '');
+  var clean = function (v) { return String(v == null ? '' : v).replace(/^'/, ''); };
+  var name = contactName_(contact);
   return {
     id: id,
-    summary: test + pro + ' - Limpieza facial (web)',
-    description: 'Profesional: ' + cfg.PROFESSIONAL_NAME + '\nServicio: ' + cfg.SERVICE_NAME +
-                 '\nReserva: ' + bookingId + '\nOrigen: landing web',
+    summary: test + [cfg.EVENT_PRO_CODE, cfg.EVENT_SERVICE_CODE, name, clientCode].join(' - '),
+    description: [
+      'Cliente: ' + name + (clientCode === 'N' ? ' (nueva)' : ' (recurrente)'),
+      'Celular: ' + clean(contact['Celular']),
+      'Correo: ' + clean(contact['Email']),
+      'Servicio: ' + cfg.SERVICE_NAME + ' (' + cfg.DURATION_MIN + ' min)',
+      'Profesional: ' + cfg.PROFESSIONAL_NAME,
+      'Reserva: ' + bookingId + ' · Solicitud: ' + requestId,
+      'Origen: landing web. Estado de pago: ver planilla Datos Landing.'
+    ].join('\n'),
     start: { dateTime: slot.start.toISOString(), timeZone: cfg.TIMEZONE },
     end: { dateTime: slot.end.toISOString(), timeZone: cfg.TIMEZONE },
     transparency: 'opaque',
+    visibility: 'private',
     extendedProperties: { private: { bookingId: bookingId, requestId: requestId, source: EVENT_SOURCE_TAG, role: 'consultorio' } }
   };
 }
@@ -259,11 +293,11 @@ function externalOverlap_(calId, ws, we, ownIds) {
 /** Nuevas recomendaciones cuando el horario elegido se ocupó (sin repetir ese horario). */
 function alternatives_(cfg, start, now) {
   try {
-    return recommendSlots_(cfg, now, start.toISOString()).slots.map(publicSlot_);
+    return recommendSlots_(cfg, now, 0, start.toISOString()).slots.map(publicSlot_);
   } catch (e) { return []; }
 }
 
-function publicSlot_(s) { return { start: s.start.toISOString(), date: s.date, time: s.time, soon: !!s.soon }; }
+function publicSlot_(s) { return { start: s.start.toISOString(), date: s.date, time: s.time, soon: !!s.soon, band: s.band || '' }; }
 
 function shortErr_(e) { return String(e && e.message || e).slice(0, 160); }
 function ok_(data) { data.ok = true; return data; }

@@ -7,7 +7,8 @@
 function doGet() {
   var cfg = getConfig();
   var missing = missingConfig_(cfg);
-  return json_({ ok: true, service: 'cc-limpieza-facial', env: cfg.ENV, ready: missing.length === 0, missing: missing });
+  return json_({ ok: true, service: 'cc-limpieza-facial', env: cfg.ENV, ready: missing.length === 0, missing: missing,
+                 aiReady: !!(cfg.AI_ENABLED && getSecret_('ANTHROPIC_API_KEY')) });
 }
 
 function doPost(e) {
@@ -93,20 +94,21 @@ function handleLead_(cfg, body, now) {
 }
 
 // ── 2) Horarios recomendados ─────────────────────────────────
-// Se ofrecen RECOMMEND_COUNT horarios (los más próximos, priorizando las próximas
-// RECOMMEND_WITHIN_HOURS horas). Si ninguno le sirve, la persona escribe por WhatsApp.
+// Un horario por franja (primera hora de la tarde, media tarde, noche), el más próximo de cada una.
+// body.page pide los siguientes. Si ninguno le sirve, la persona escribe por WhatsApp (otra pantalla).
 function handleAvailability_(cfg, body, now) {
   if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
   if (!cfg.ROOM_CALENDAR_LIST.length) return fail_('calendar_not_configured');
 
   var cache = CacheService.getScriptCache();
-  var ck = 'rec:' + (cache.get('av_gen') || '0') + ':' + Math.floor(now.getTime() / 60000);
+  var page = Math.max(0, Math.min(Number(body.page) || 0, 20));
+  var ck = 'rec:' + (cache.get('av_gen') || '0') + ':' + page + ':' + Math.floor(now.getTime() / 60000);
   var cached = cache.get(ck);
   var result;
   if (cached) result = JSON.parse(cached);
   else {
-    var r = recommendSlots_(cfg, now);
-    result = { slots: r.slots.map(publicSlot_), calendarErrors: r.calendarErrors };
+    var r = recommendSlots_(cfg, now, page);
+    result = { slots: r.slots.map(publicSlot_), hasMore: r.hasMore, calendarErrors: r.calendarErrors };
     cache.put(ck, JSON.stringify(result), 45); // caché corta: igual se revalida al confirmar
   }
   if (result.calendarErrors) logEvent_(cfg, body.requestId, 'error_lectura_calendario', {});
@@ -116,7 +118,9 @@ function handleAvailability_(cfg, body, now) {
   }
   return {
     ok: true, timezone: cfg.TIMEZONE,
+    page: page,
     slots: result.slots,
+    hasMore: !!result.hasMore,
     withinHours: cfg.RECOMMEND_WITHIN_HOURS,
     durationMin: cfg.DURATION_MIN,
     whatsapp: cfg.WHATSAPP_NUMBER,

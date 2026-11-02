@@ -11,24 +11,27 @@
   var leads = {};
   function delay(v, ms) { return new Promise(function (r) { setTimeout(function () { r(v); }, ms || 500); }); }
   function ymdAdd(ymd, n) { var a = ymd.split('-'); var d = new Date(Date.UTC(+a[0], +a[1] - 1, +a[2] + n, 15)); return d.toISOString().slice(0, 10); }
-  // Igual que el servidor: los 3 horarios libres más próximos, sin superponerse (martes y jueves de 9 a 13 en la demo).
-  function recommend(exclude) {
-    if (q.get('empty') === '1') return [];
-    var now = Date.now(), soon = now + 24 * 3600000, out = [];
+  // Igual que el servidor: un horario por franja (13–15, 15–18, 18–21), el más próximo; page pide los siguientes.
+  var BANDS = [['Primera hora de la tarde', 13 * 60, 15 * 60], ['Media tarde', 15 * 60, 18 * 60], ['Noche', 18 * 60, 21 * 60]];
+  function recommend(page, exclude) {
+    if (q.get('empty') === '1') return { slots: [], hasMore: false };
+    var now = Date.now(), soon = now + 24 * 3600000, buckets = BANDS.map(function () { return []; });
     slotsFor(new Date(now - 3 * 3600000).toISOString().slice(0, 10), 21).forEach(function (s) {
-      var t = new Date(s.start).getTime();
-      if (out.length >= 3 || s.start === exclude) return;
-      if (out.some(function (o) { return Math.abs(new Date(o.start).getTime() - t) < 3600000; })) return;
-      s.soon = t <= soon; out.push(s);
+      if (s.start === exclude) return;
+      var t = +s.time.slice(0, 2) * 60 + +s.time.slice(3);
+      BANDS.forEach(function (b, i) { if (t >= b[1] && t < b[2]) buckets[i].push(s); });
     });
-    return out;
+    var out = [];
+    buckets.forEach(function (list, i) { var s = list[page]; if (s) { s.band = BANDS[i][0]; s.soon = new Date(s.start).getTime() <= soon; out.push(s); } });
+    out.sort(function (a, b) { return a.start < b.start ? -1 : 1; });
+    return { slots: out, hasMore: buckets.some(function (l) { return l.length > page + 1; }) && page < 4 };
   }
   function slotsFor(from, days) {
     var out = [], now = Date.now();
     for (var i = 0; i < days; i++) {
       var ymd = ymdAdd(from, i), d = new Date(ymd + 'T12:00:00-03:00'), dow = d.getUTCDay();
-      if (dow !== 2 && dow !== 4) continue;
-      for (var t = 9 * 60; t <= 12 * 60; t += 30) {
+      if (dow === 0 || dow === 6) continue;
+      for (var t = 13 * 60; t <= 20 * 60; t += 30) {
         var seed = (+ymd.replace(/-/g, '') + t) % 7;
         if (seed === 0 || seed === 3) continue; // ocupados ficticios
         var hh = ('0' + Math.floor(t / 60)).slice(-2), mm = ('0' + (t % 60)).slice(-2);
@@ -47,7 +50,8 @@
         return delay({ ok: true, requestId: id, token: 'demo', leadEventId: 'lead_' + id }, 700);
       }
       if (b.action === 'availability') {
-        return delay({ ok: true, slots: recommend(), withinHours: 24, durationMin: 60, whatsapp: q.get('wa') || '', timezone: 'America/Montevideo' }, 600);
+        var r = recommend(b.page || 0);
+        return delay({ ok: true, page: b.page || 0, slots: r.slots, hasMore: r.hasMore, withinHours: 24, durationMin: 60, whatsapp: q.get('wa') || '', timezone: 'America/Montevideo' }, 600);
       }
       if (b.action === 'track') return delay({ ok: true }, 50);
       if (b.action === 'analyze') {
@@ -63,14 +67,15 @@
         if (conflictOnce) {
           conflictOnce = false; booked[b.start] = true;
           var d = b.start.slice(0, 10);
-          return delay({ ok: false, code: 'slot_unavailable', alternatives: recommend(b.start) }, 900);
+          return delay({ ok: false, code: 'slot_unavailable', alternatives: recommend(0, b.start).slots }, 900);
         }
         booked[b.start] = true;
         var s = new Date(b.start), e = new Date(s.getTime() + 3600000);
         var local = new Date(s.getTime() - 3 * 3600000).toISOString();
         return delay({ ok: true, bookingId: 'RDEMO' + Math.random().toString(16).slice(2, 7).toUpperCase(), scheduleEventId: 'schedule_demo',
           date: local.slice(0, 10), time: local.slice(11, 16), startIso: s.toISOString(), endIso: e.toISOString(), durationMin: 60,
-          professional: 'Lic. Jaqueline Mansilla', address: 'Av. Centenario 3090A, Montevideo', timezone: 'America/Montevideo' }, 1100);
+          professional: 'Lic. Jaqueline Mansilla', address: 'Av. Centenario 3090A, Montevideo', timezone: 'America/Montevideo',
+          whatsapp: q.get('wa') || '', emailSent: true }, 1100);
       }
       return delay({ ok: false, code: 'invalid_request' });
     }
