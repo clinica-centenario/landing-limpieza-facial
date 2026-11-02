@@ -4,17 +4,18 @@
  * Principios:
  *  - Orientación COSMÉTICA, no diagnóstico. No se nombran enfermedades ni se deriva: lo complejo
  *    queda para evaluar en la consulta. No se recomiendan productos ni técnicas.
- *  - El tipo de piel sale del cuestionario (Orientation.gs).
+ *  - El tipo de piel combina el brillo medido en la foto con las respuestas (Orientation.gs).
  *  - La foto se analiza SOLO en el teléfono (MediaPipe Face Landmarker, Apache-2.0). Acá nunca llega
  *    la imagen: solo las categorías encontradas y los números medidos, que se guardan para calibrar.
  *  - Las respuestas del cuestionario no se guardan: en la planilla queda el resultado con su fundamento.
- *  - Solo mayores de 18. Primero se guardan los datos de contacto (lead) para vincularlo con la reserva.
+ *  - Solo mayores de 18. Los datos de contacto (lead) se guardan antes de mostrar el resultado, para vincularlo con la reserva.
  */
 
 // Lo que el teléfono puede informar de la foto: categorías cerradas.
-var PHOTO_FINDINGS = ['brillo_zona_t', 'brillo_general', 'textura_irregular', 'tono_desparejo', 'enrojecimiento_visible'];
+var PHOTO_FINDINGS = ['brillo_zona_t', 'brillo_general', 'textura_irregular', 'tono_desparejo', 'enrojecimiento_visible',
+                      'puntos_negros_posibles', 'poros_visibles_posibles'];
 // Números medidos en el teléfono (se guardan redondeados, para calibrar los umbrales).
-var PHOTO_METRICS = ['brilloZonaT', 'brilloMejillas', 'rojezDif', 'texturaMejillas', 'tonoMejillas'];
+var PHOTO_METRICS = ['fotos', 'brilloZonaT', 'brilloMejillas', 'rojezDif', 'texturaMejillas', 'tonoMejillas', 'puntosNariz', 'porosMejillas'];
 
 function handleAnalyze_(cfg, body) {
   if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
@@ -31,6 +32,7 @@ function handleAnalyze_(cfg, body) {
     if (contact) appendAnalysis_(cfg, contact, result);
   } catch (e) { console.warn('No se pudo guardar el análisis: ' + shortErr_(e)); }
   delete result.photoMetrics; // los números quedan en la planilla, no hace falta devolverlos
+  result.whatsapp = cfg.WHATSAPP_NUMBER; // para que la persona reciba su resultado por WhatsApp
   result.ok = true;
   result.status = 'ok';
   return result;

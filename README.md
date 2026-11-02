@@ -125,18 +125,19 @@ Todo con la cuenta **ccentenario3090@gmail.com**. Nunca compartas contraseñas n
 
 **Calendario de la profesional (opcional):** hoy no se usa; la disponibilidad la carga el equipo en Horarios. Si más adelante se quiere cruzar y escribir también en su calendario, cargar `PRO_CALENDAR_ID` en Propiedades del script.
 
-## 7 bis. Orientación para tu piel (cuestionario + foto opcional)
+## 7 bis. Evaluá tu cara con IA
 
-Recorrido: introducción (18+) → datos de contacto (la misma solicitud sirve para reservar) → 9 preguntas con condicionales → foto opcional → resultado → reservar.
+Recorrido: botón "Evaluá tu cara con IA" en la portada → introducción (18+) → **cámara guiada** con óvalo: foto de frente, de un costado y del otro, con captura automática cuando la cara está centrada, quieta, nítida y con buena luz (alternativas: subir una foto o hacerlo sin fotos) → **4 preguntas** (5 sin fotos) → datos de contacto → resultado → WhatsApp o reserva.
 
 | Pieza | Dónde | Qué hace |
 |---|---|---|
-| Cuestionario | `public/app.js` (`QUIZ`) | Brillo, tirantez, descamación, reactividad, imperfecciones, objetivo, exfoliantes/retinoides, procedimientos recientes, lesiones. "No sé" donde corresponde |
-| Control técnico de la foto | `public/app.js` (`PHOTO_RULES`), en el teléfono | MediaPipe Face Landmarker (Apache-2.0, el mismo modelo que incluye UniFace): un solo rostro, encuadre y tamaño, giro e inclinación, nitidez, exposición (recortes y contraste, no brillo promedio) y aviso de luz despareja. **No detecta maquillaje ni filtros**: se le pide a la persona. Si no puede revisar la foto, no la usa |
-| Indicadores de piel en la foto | `public/app.js` (`SKIN_RULES`, `measureSkin`), en el teléfono | Con los puntos faciales se toman zonas fijas (frente y nariz contra mejillas) y se miden reflejos de brillo, textura fina, variación de tono (descontando la luz que cambia de a poco) y rojez relativa (sin contar reflejos). Son mediciones de imagen con umbrales **provisorios**, no un modelo validado de piel |
-| Reglas de orientación | `backend/Orientation.gs` (`ORIENTATION_RULES_VERSION`) | Tipo de piel solo con el cuestionario (si se contradice: el más probable, con aviso), necesidades referidas, beneficios posibles, límites, "para ver en la consulta" y cuidados básicos. Cada conclusión lleva origen y regla |
-| Textos de la foto | `backend/Orientation.gs` (`PHOTO_OBSERVATIONS_`) | Un texto fijo por indicador encontrado, con la aclaración de que la luz y la cámara pueden cambiar las mediciones |
-| Registro | Pestaña "Análisis de piel" | Resultado con origen y regla de cada conclusión, versión de reglas, si hubo foto y los **números medidos** (para calibrar). **No se guardan la foto ni las respuestas** |
+| Cámara guiada | `public/app.js` (`CAM_RULES`) | MediaPipe Face Landmarker en modo video (el modelo Apache-2.0 que incluye UniFace): posición y tamaño en el óvalo, giro e inclinación, luz; mensajes guía y captura automática |
+| Control técnico | `PHOTO_RULES` | Un solo rostro, encuadre, nitidez, exposición (recortes y contraste, no brillo promedio). **No detecta maquillaje ni filtros** |
+| Indicadores de piel | `SKIN_RULES`, `measureSkin` | Zona T contra mejillas (de frente) y la mejilla visible en cada costado: brillo, textura, tono (descontando la luz gradual), rojez relativa (sin reflejos) y, **en prueba**, puntos oscuros en la nariz y poros. Umbrales provisorios |
+| Preguntas | `QUIZ` | Tirantez o descamación, reactividad, qué quiere mejorar (hasta 2), qué aplica ahora (exfoliantes o retinoides, procedimiento reciente, lesiones). Sin fotos se suma el brillo |
+| Reglas | `backend/Orientation.gs` (`v2-2026-11`) | Tipo de piel con el brillo medido en las fotos y la sequedad de las respuestas (si se contradicen: el más probable con aviso); lo identificado; beneficios; "para ver en la consulta"; cuidados básicos. Cada conclusión con origen y regla |
+| Resultado | `public/app.js` | Tipo de piel, lo identificado (con "análisis en prueba" donde corresponde), dibujo de las zonas medidas sobre la foto de frente, botón "Recibir mi resultado por WhatsApp" (chat con la clínica con el resumen) y reserva |
+| Registro | Pestaña "Análisis de piel" | Resultado con fundamento, versión de reglas y números medidos. **No se guardan las fotos ni las respuestas** |
 
 **Decisiones de la clínica:** no se recomiendan productos, técnicas ni tratamientos; no se deriva a otros profesionales, lo complejo queda "para ver con la profesional en la consulta"; los beneficios se basan en lo que se encontró; los cuidados son básicos y cortos.
 

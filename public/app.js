@@ -476,71 +476,385 @@
     }
   })();
 
-  // ── Orientación de la piel (cuestionario + foto opcional) ─
-  // Recorrido: introducción → datos → cuestionario → foto (opcional) → resultado.
-  // El tipo de piel sale de las respuestas. La foto se analiza SOLO en el teléfono: MediaPipe Face Landmarker
-  // (el mismo modelo Apache-2.0 que incluye UniFace) ubica el rostro y sus zonas, y se miden brillo, textura,
-  // tono y enrojecimiento relativo con reglas simples. La foto nunca se envía ni se guarda: al servidor llegan
-  // solo las categorías encontradas y los números medidos (para calibrar).
+  // ── Evaluá tu cara con IA ─────────────────────────────────
+  // Recorrido: introducción → cámara guiada (frente, un costado, el otro) → 4 preguntas → datos → resultado.
+  // Las fotos se analizan SOLO en el teléfono: MediaPipe Face Landmarker (el modelo Apache-2.0 que incluye
+  // UniFace) ubica el rostro y sus zonas, y se miden brillo, textura, tono, rojez relativa y, en prueba,
+  // puntos oscuros en la nariz y poros. Las fotos nunca se envían ni se guardan: al servidor llegan solo
+  // las categorías encontradas y los números medidos (para calibrar).
   // Analítica: solo hitos del recorrido, nunca respuestas, perfiles ni hallazgos.
   var QUIZ = [
-    { k: 'brillo', q: 'A media tarde, ¿cómo está tu piel?', o: [['toda', 'Con brillo en toda la cara'], ['zona_t', 'Con brillo solo en frente, nariz y mentón'], ['no', 'Sin brillo notable'], ['nose', 'No sé']] },
-    { k: 'tirantez', q: 'Después de lavarte la cara, ¿sentís tirantez?', o: [['siempre', 'Sí, casi siempre'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
-    { k: 'descamacion', q: '¿Notás zonas que se descaman o se sienten ásperas y secas?', o: [['si', 'Sí'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
+    { k: 'sequedad', q: 'Después de lavarte la cara, ¿sentís tirantez o se te descama?', o: [['siempre', 'Sí, casi siempre'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
     { k: 'reactividad', q: '¿Tu piel arde, pica o se enrojece con algunos productos?', o: [['seguido', 'Sí, seguido'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
-    { k: 'imperfecciones', multi: true, q: '¿Qué notás en tu piel? Podés marcar varias.', o: [['puntos_negros', 'Puntos negros'], ['granitos', 'Granitos de vez en cuando'], ['poros', 'Poros marcados'], ['textura', 'Textura irregular'], ['nada', 'Nada en especial'], ['nose', 'No sé']] },
-    { k: 'objetivo', q: '¿Qué te gustaría lograr principalmente?', o: [['suavidad', 'Piel más suave'], ['luminosidad', 'Más luminosidad'], ['confort', 'Más confort'], ['limpieza', 'Sensación de limpieza'], ['otro', 'Otro']] },
-    { k: 'exfoliantes', q: '¿Usás exfoliantes o productos con retinoides (retinol, ácido retinoico)?', o: [['si', 'Sí'], ['no', 'No'], ['nose', 'No sé']],
-      follow: { k: 'exfoliantes_cual', when: 'si', q: '¿Cuáles?', o: [['exfoliante', 'Exfoliantes'], ['retinoide', 'Retinoides'], ['ambos', 'Los dos'], ['nose', 'No sé']] } },
-    { k: 'procedimiento', q: 'En el último mes, ¿te hiciste algún procedimiento o tratamiento en el rostro (peeling, láser u otro)?', o: [['si', 'Sí'], ['no', 'No'], ['nose', 'No sé']],
-      follow: { k: 'procedimiento_tipo', when: 'si', q: '¿De qué tipo?', o: [['estetico', 'Estético'], ['medico', 'Indicado por un profesional de la salud'], ['otro', 'Otro']] } },
-    { k: 'lesiones', q: '¿Tenés ahora irritación fuerte, heridas, lesiones que duelen, o algo en la piel que cambia o sangra?', o: [['si', 'Sí'], ['no', 'No']] }
+    { k: 'mejorar', multi: true, max: 2, q: '¿Qué te gustaría mejorar? Elegí hasta 2.', o: [['puntos_negros', 'Puntos negros'], ['poros', 'Poros'], ['suavidad', 'Suavidad'], ['luminosidad', 'Luminosidad'], ['confort', 'Confort e hidratación'], ['brillo', 'Brillo']] },
+    { k: 'aplica', multi: true, exclusive: ['ninguna'], q: '¿Algo de esto aplica ahora?', o: [['exfoliantes', 'Uso exfoliantes o retinoides (retinol, ácido retinoico)'], ['procedimiento', 'Me hice un procedimiento en el rostro en el último mes'], ['lesiones', 'Tengo irritación fuerte, heridas o una lesión que duele, cambia o sangra'], ['ninguna', 'Ninguna']] }
   ];
+  var QUIZ_NO_PHOTO = { k: 'brillo', q: 'A media tarde, ¿cómo está tu piel?', o: [['toda', 'Con brillo en toda la cara'], ['zona_t', 'Con brillo solo en frente, nariz y mentón'], ['no', 'Sin brillo notable'], ['nose', 'No sé']] };
 
   // Controles técnicos de la foto. Valores iniciales: calibrarlos con fotos reales de distintos tonos de piel,
   // teléfonos y luces. La exposición se mide por recortes extremos y contraste, no por brillo promedio,
   // para no penalizar pieles oscuras. Maquillaje, filtros y modo belleza NO se detectan: se pide a la persona.
   var PHOTO_RULES = { minFaceWidth: 0.28, minYawBalance: 0.55, maxRollDeg: 12, minSharpness: 45,
     maxClipHigh: 0.12, maxClipLow: 0.30, minContrast: 30, maxCheekRatio: 1.7 };
-  // Indicadores de piel medidos en la foto. Umbrales PROVISORIOS: se calibran con las pruebas en teléfonos
-  // (modo ?diagnostico=1 muestra los números). Son mediciones de imagen, no un modelo validado de piel.
-  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, rednessDiff: 0.035, texture: 7, toneCv: 0.07 };
+  // Guía de cámara: posición dentro del óvalo y giro (s = -1..1; 0 = de frente).
+  var CAM_RULES = { frontMaxTurn: 0.18, sideMinTurn: 0.30, sideMaxTurn: 0.80, centerTol: 0.10, minSize: 0.42, sideMinSize: 0.28, maxSize: 0.80, holdFrames: 10 };
+  // Indicadores de piel. Umbrales PROVISORIOS (calibrar con ?diagnostico=1). Mediciones de imagen, no un modelo validado.
+  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, rednessDiff: 0.035, texture: 7, toneCv: 0.07,
+    noseSpots: 3.5, cheekPores: 7 };
   var DIAG = params.get('diagnostico') === '1';
   var MP_VER = '0.10.14';
   var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + MP_VER;
   var MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+  // Zonas de la malla facial de MediaPipe usadas para medir.
+  var ZONE_T = [151, 108, 337, 4, 195, 5], CHEEK_R = [50, 117, 205], CHEEK_L = [280, 346, 425];
+  var ZONE_NOSE = [48, 278, 4, 45, 275], ZONE_PORES = [205, 425, 36, 266];
+
+  // Utilidades de imagen: escala de grises, estadísticas, textura y tono (la del tono descuenta
+  // la luz que cambia de a poco, para que la sombra natural de la mejilla no cuente como tono desparejo).
+  function grayCrop(canvas, x, y, w, h, size) {
+    var k = size / Math.max(1, w), c = document.createElement('canvas');
+    c.width = size; c.height = Math.max(1, Math.round(h * k));
+    c.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, c.width, c.height);
+    var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, g = new Float32Array(c.width * c.height);
+    for (var i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    return { g: g, w: c.width, h: c.height };
+  }
+  function imageStats(im) {
+    var g = im.g, w = im.w, h = im.h, n = g.length, hi = 0, lo = 0, hist = new Uint32Array(256), sum = 0, sum2 = 0, m = 0;
+    for (var i = 0; i < n; i++) { var v = g[i] | 0; hist[v]++; if (v >= 250) hi++; if (v <= 15) lo++; }
+    for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+      var p = y * w + x, lap = g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p];
+      sum += lap; sum2 += lap * lap; m++;
+    }
+    var pct = function (t) { var acc = 0; for (var k = 0; k < 256; k++) { acc += hist[k]; if (acc >= n * t) return k; } return 255; };
+    return { clipHigh: hi / n, clipLow: lo / n, contrast: pct(0.95) - pct(0.05), sharpness: m ? (sum2 / m - Math.pow(sum / m, 2)) : 0 };
+  }
+  function meanLum(canvas, x, y, s) {
+    var im = grayCrop(canvas, Math.max(0, x), Math.max(0, y), Math.max(1, s), Math.max(1, s), 24), t = 0;
+    for (var i = 0; i < im.g.length; i++) t += im.g[i];
+    return t / im.g.length;
+  }
+  function lapEnergy(im) {
+    var g = im.g, w = im.w, h = im.h, s = 0, m = 0, mean = 0;
+    for (var i = 0; i < g.length; i++) mean += g[i];
+    mean /= g.length;
+    for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+      var p = y * w + x; s += Math.abs(g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p]); m++;
+    }
+    return m ? (s / m) / (mean + 1) * 100 : 0; // relativo al brillo de la zona
+  }
+  function detrendedCv(im) {
+    var g = im.g, w = im.w, h = im.h, n = g.length, mean = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxg = 0, syg = 0;
+    for (var i = 0; i < n; i++) mean += g[i];
+    mean /= n;
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+      var cx = x - (w - 1) / 2, cy = y - (h - 1) / 2, v = g[y * w + x] - mean;
+      sxx += cx * cx; syy += cy * cy; sxg += cx * v; syg += cy * v;
+    }
+    var b = sxx ? sxg / sxx : 0, c = syy ? syg / syy : 0, res = 0;
+    for (var y2 = 0; y2 < h; y2++) for (var x2 = 0; x2 < w; x2++) {
+      var r = g[y2 * w + x2] - mean - b * (x2 - (w - 1) / 2) - c * (y2 - (h - 1) / 2);
+      res += r * r;
+    }
+    return mean ? Math.sqrt(res / n) / mean : 0;
+  }
 
   (function skinOrientation() {
     if (!CFG.AI_ANALYSIS_ENABLED) return;
-    $('#analisis').hidden = false; $('#aiHeroLink').hidden = false;
+    $('#analisis').hidden = false; $('#aiHeroLink').hidden = false; $('#aiHeroMicro').hidden = false;
     var card = $('#analisis .ai-tool');
-    var answers = {}, qi = 0, measured = null, busy = false, landmarker = null;
+    var answers = {}, quiz = QUIZ, qi = 0, shots = [], measured = null, busy = false, lms = {}, cam = null;
 
     function show(name) {
-      $$('[data-ai]', card).forEach(function (el) { el.hidden = el.getAttribute('data-ai') !== name; });
-      var target = $('[data-ai="' + name + '"]', card);
+      $$('[data-ai]', card).forEach(function (e) { e.hidden = e.getAttribute('data-ai') !== name; });
       if (card.getBoundingClientRect().top < 0) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      return target;
     }
     function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+    function getLandmarker(mode) {
+      if (lms[mode]) return lms[mode];
+      lms[mode] = import(MP_BASE + '/vision_bundle.mjs').then(function (v) {
+        return v.FilesetResolver.forVisionTasks(MP_BASE + '/wasm').then(function (fs) {
+          return v.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL }, runningMode: mode, numFaces: 2 });
+        });
+      });
+      lms[mode].catch(function () { delete lms[mode]; });
+      return lms[mode];
+    }
+    function diag(d) { var b = $('#aiDiag'); if (!DIAG || !d) { b.hidden = true; return; } b.textContent = JSON.stringify(d, null, 1); b.hidden = false; }
 
     // 1. Introducción
-    $('#aiStart').addEventListener('click', function () {
-      if (!$('#aiAdult').checked) { status($('#aiIntroStatus'), 'Esta orientación es solo para mayores de 18 años.', 'error'); return; }
-      status($('#aiIntroStatus'), '');
-      Track.send('analisis_inicio', { dedupeKey: 'analisis_inicio:' + PAGE_LOADED_AT });
-      if (session) startQuiz(); else show('datos');
-    });
+    function needsAdult() {
+      if ($('#aiAdult').checked) { status($('#aiIntroStatus'), ''); return false; }
+      status($('#aiIntroStatus'), 'Esta evaluación es solo para mayores de 18 años.', 'error'); return true;
+    }
+    function begin() { Track.send('analisis_inicio', { dedupeKey: 'analisis_inicio:' + PAGE_LOADED_AT }); }
+    $('#aiStart').addEventListener('click', function () { if (needsAdult()) return; begin(); startCamera(); });
+    $('#aiUploadStart').addEventListener('click', function () { if (needsAdult()) return; begin(); show('camara'); $('#aiFile').click(); });
+    $('#aiNoPhoto').addEventListener('click', function () { if (needsAdult()) return; begin(); shots = []; measured = null; startQuiz(); });
 
-    // 2. Datos de contacto
-    bindLeadForm({ form: $('#aiLead'), btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
-      onSaved: function () {
-        startQuiz();
-        if (!store.get('sessionStorage', 'cc_booking')) prepareScheduling();
-      } });
+    // 2. Cámara guiada
+    var STEPS = [{ key: 'frente', label: 'De frente' }, { key: 'lado1', label: 'Un costado' }, { key: 'lado2', label: 'El otro costado' }];
+    function setMsg(t, ready) { $('#aiCamMsg').textContent = t; $('#aiCam').classList.toggle('is-ready', !!ready); }
+    function startCamera() {
+      show('camara'); resetShots(); setMsg('Preparando la cámara…');
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return cameraFail('Este navegador no permite usar la cámara.');
+      var video = $('#aiVideo');
+      Promise.all([
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false }),
+        getLandmarker('VIDEO')
+      ]).then(function (r) {
+        cam = { stream: r[0], lm: r[1], step: 0, hold: 0, firstSign: 0, last: 0, frame: 0, light: null, started: Date.now() };
+        video.srcObject = r[0];
+        return video.play().then(function () { loop(); });
+      }).catch(function (e) {
+        cameraFail(e && e.name === 'NotAllowedError' ? 'No diste permiso para usar la cámara.' : 'No pudimos abrir la cámara.');
+      });
+    }
+    function cameraFail(msg) {
+      stopCamera(); setMsg(msg);
+      status($('#aiCamStatus'), msg + ' Podés subir una foto o hacerlo sin fotos.', 'error');
+    }
+    function stopCamera() {
+      if (cam && cam.stream) cam.stream.getTracks().forEach(function (t) { t.stop(); });
+      if (cam) cam.stopped = true;
+      cam = null;
+    }
+    function resetShots() {
+      shots = []; measured = null; $('#aiThumbs').innerHTML = ''; diag(null);
+      $('#aiCamDone').hidden = true; $('#aiRetake').hidden = true; $('#aiSkipSides').hidden = true; status($('#aiCamStatus'), '');
+      $('#aiCamStep').textContent = 'Foto 1 de 3 · De frente';
+    }
+    /** Posición del rostro en el recuadro visible (el video se muestra recortado y en espejo). */
+    function faceBox(P, video) {
+      var vw = video.videoWidth, vh = video.videoHeight, box = $('#aiCam').getBoundingClientRect();
+      var sc = Math.max(box.width / vw, box.height / vh), ox = (vw * sc - box.width) / 2, oy = (vh * sc - box.height) / 2;
+      var xs = P.map(function (p) { return 1 - (p.x * vw * sc - ox) / box.width; }), ys = P.map(function (p) { return (p.y * vh * sc - oy) / box.height; });
+      var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+      return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX };
+    }
+    /** Giro: -1..1 (0 = de frente). El signo distingue un costado del otro. */
+    function turnOf(P) { var dl = Math.abs(P[1].x - P[234].x), dr = Math.abs(P[454].x - P[1].x); return (dl - dr) / Math.max(1e-6, dl + dr); }
+    function rollOf(P, W, H) { return Math.abs(Math.atan2((P[263].y - P[33].y) * H, (P[263].x - P[33].x) * W) * 180 / Math.PI); }
+    function loop() {
+      if (!cam || cam.stopped) return;
+      var video = $('#aiVideo'), now = performance.now();
+      if (now - cam.last < 66 || video.readyState < 2) { requestAnimationFrame(loop); return; } // ~15 cuadros por segundo
+      cam.last = now; cam.frame++;
+      var res = cam.lm.detectForVideo(video, now), faces = res && res.faceLandmarks || [];
+      guide(faces, video);
+      requestAnimationFrame(loop);
+    }
+    function guide(faces, video) {
+      var st = STEPS[cam.step], R = CAM_RULES;
+      if (cam.step > 0 && Date.now() - cam.stepAt > 12000) $('#aiSkipSides').hidden = false;
+      if (!faces.length) { cam.hold = 0; return setMsg('Centrá tu cara en el óvalo'); }
+      if (faces.length > 1) { cam.hold = 0; return setMsg('Tiene que aparecer solo tu cara'); }
+      var P = faces[0], b = faceBox(P, video), s = turnOf(P), roll = rollOf(P, video.videoWidth, video.videoHeight);
+      if (cam.frame % 6 === 0) cam.light = lightOf(video, P);
+      var msg = '';
+      if (b.w < (cam.step ? R.sideMinSize : R.minSize)) msg = 'Acercate un poco'; // de costado la cara se ve más angosta
+      else if (b.w > R.maxSize) msg = 'Alejate un poco';
+      else if (Math.abs(b.cx - 0.5) > (cam.step ? R.centerTol * 1.6 : R.centerTol) || Math.abs(b.cy - 0.45) > R.centerTol * 1.4) msg = 'Centrá tu cara en el óvalo';
+      else if (cam.light === 'oscuro') msg = 'Buscá más luz, de frente';
+      else if (cam.light === 'quemado') msg = 'Hay demasiada luz: buscá una más suave';
+      else if (cam.step === 0) {
+        if (Math.abs(s) > R.frontMaxTurn) msg = 'Mirá de frente a la cámara';
+        else if (roll > PHOTO_RULES.maxRollDeg) msg = 'Enderezá la cabeza';
+      } else {
+        var wrongSide = cam.step === 2 && Math.sign(s) === cam.firstSign && Math.abs(s) > 0.15;
+        if (wrongSide) msg = 'Ahora girá hacia el otro costado';
+        else if (Math.abs(s) < R.sideMinTurn) msg = cam.step === 1 ? 'Girá la cabeza despacio hacia un costado' : 'Girá despacio hacia el otro costado';
+        else if (Math.abs(s) > R.sideMaxTurn) msg = 'Girá un poco menos';
+      }
+      if (msg) { cam.hold = 0; return setMsg(msg); }
+      cam.hold++;
+      setMsg('¡Quedate quieta! Sacando foto…', true);
+      if (cam.hold >= R.holdFrames) capture(P, s);
+    }
+    function lightOf(video, P) {
+      var c = document.createElement('canvas'), W = video.videoWidth, H = video.videoHeight;
+      var xs = P.map(function (p) { return p.x; }), ys = P.map(function (p) { return p.y; });
+      var x = Math.min.apply(null, xs) * W, y = Math.min.apply(null, ys) * H, w = (Math.max.apply(null, xs) - Math.min.apply(null, xs)) * W, h = (Math.max.apply(null, ys) - Math.min.apply(null, ys)) * H;
+      c.width = 48; c.height = 48; c.getContext('2d').drawImage(video, x, y, w, h, 0, 0, 48, 48);
+      var d = c.getContext('2d').getImageData(0, 0, 48, 48).data, g = new Float32Array(48 * 48);
+      for (var i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      var q = imageStats({ g: g, w: 48, h: 48 });
+      return q.clipHigh > PHOTO_RULES.maxClipHigh ? 'quemado' : (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) ? 'oscuro' : 'ok';
+    }
+    function capture(P, s) {
+      var video = $('#aiVideo'), c = document.createElement('canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext('2d').drawImage(video, 0, 0); // sin espejo: la imagen real
+      var checks = {}, list = evaluatePhoto(c, [P], checks);
+      if (cam.step > 0) list = list.filter(function (x) { return !/girada/.test(x[1]); }); // en los costados el giro es lo pedido
+      var bad = list.filter(function (x) { return x[0] === 'bad'; })[0];
+      if (bad) { cam.hold = 0; setMsg(bad[1]); return; }
+      var fl = $('#aiFlash'); fl.classList.add('is-on'); setTimeout(function () { fl.classList.remove('is-on'); }, 60);
+      if (cam.step === 1) cam.firstSign = Math.sign(s);
+      shots.push({ view: STEPS[cam.step].key, canvas: c, P: P, turn: s, checks: checks });
+      addThumb(c, STEPS[cam.step].label);
+      cam.step++; cam.hold = 0; cam.stepAt = Date.now();
+      if (cam.step === 1) $('#aiSkipSides').hidden = true;
+      if (cam.step >= STEPS.length) return finishShots();
+      $('#aiCamStep').textContent = 'Foto ' + (cam.step + 1) + ' de 3 · ' + STEPS[cam.step].label;
+    }
+    function addThumb(c, label) {
+      var f = el('figure'), img = el('img');
+      var t = document.createElement('canvas'), k = 160 / c.width; t.width = 160; t.height = Math.round(c.height * k);
+      var x = t.getContext('2d'); x.translate(t.width, 0); x.scale(-1, 1); x.drawImage(c, 0, 0, t.width, t.height); // miniatura en espejo, como la ve la persona
+      img.src = t.toDataURL('image/jpeg', 0.7); img.alt = 'Foto: ' + label;
+      f.appendChild(img); f.appendChild(document.createTextNode(label)); $('#aiThumbs').appendChild(f);
+    }
+    function finishShots() {
+      stopCamera();
+      measured = measureSkin(shots);
+      setMsg(shots.length > 1 ? '¡Listo! Tenemos tus fotos.' : '¡Listo! Tenemos tu foto.', true);
+      diag({ controles: shots.map(function (x) { return x.checks; }), indicadores: measured.metrics, hallazgos: measured.findings });
+      $('#aiCamDone').hidden = false; $('#aiRetake').hidden = false; $('#aiSkipSides').hidden = true;
+      Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
+    }
+    $('#aiSkipSides').addEventListener('click', function () { if (shots.length) finishShots(); });
+    $('#aiRetake').addEventListener('click', startCamera);
+    $('#aiCamDone').addEventListener('click', function () { startQuiz(); });
 
-    // 3. Cuestionario
-    function startQuiz() { qi = 0; show('quiz'); renderQuestion(); }
+    // Alternativa: subir una foto de frente
+    $('#aiFile').addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
+    function loadFile(f) {
+      stopCamera(); resetShots();
+      if (!f) return;
+      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { status($('#aiCamStatus'), 'Elegí una foto (JPG o PNG).', 'error'); return; }
+      var url = URL.createObjectURL(f), img = new Image();
+      img.onload = function () {
+        var max = 1280, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        var c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // respeta la orientación EXIF y no copia metadatos
+        URL.revokeObjectURL(url);
+        if (Math.min(img.naturalWidth, img.naturalHeight) < 480) return photoRejected('La foto tiene poca resolución. Probá con la cámara del teléfono.');
+        setMsg('Revisando la foto…');
+        getLandmarker('IMAGE').then(function (lm) {
+          var faces = (lm.detect(c) || {}).faceLandmarks || [], checks = {}, list = evaluatePhoto(c, faces, checks);
+          var bad = list.filter(function (x) { return x[0] === 'bad'; }).map(function (x) { return x[1]; });
+          if (bad.length) return photoRejected(bad.join(' '), checks);
+          shots = [{ view: 'frente', canvas: c, P: faces[0], turn: 0, checks: checks }];
+          addThumb(c, 'De frente'); finishShots();
+        }).catch(function () { photoRejected('No pudimos revisar la foto en este dispositivo. Podés hacerlo sin fotos.'); });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); status($('#aiCamStatus'), 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
+      img.src = url;
+    }
+    function photoRejected(msg, checks) {
+      setMsg('Esta foto no sirve'); diag(checks ? { controles: checks } : null);
+      status($('#aiCamStatus'), msg + ' Sacá otra o hacelo sin fotos.', 'error');
+      Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
+    }
+
+    function evaluatePhoto(canvas, faces, m) {
+      if (!faces.length) return [['bad', 'No encontramos un rostro. Ponete de frente y que se vea toda tu cara.']];
+      if (faces.length > 1) return [['bad', 'Se ve más de una persona. Tiene que aparecer solo tu cara.']];
+      var P = faces[0], W = canvas.width, H = canvas.height, out = [];
+      var xs = P.map(function (p) { return p.x; }), ys = P.map(function (p) { return p.y; });
+      var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+      m.anchoRostro = +(maxX - minX).toFixed(3);
+      if (minX < 0 || minY < 0 || maxX > 1 || maxY > 1) out.push(['bad', 'Tu cara quedó cortada. Alejá un poco la cámara.']);
+      else if (maxX - minX < PHOTO_RULES.minFaceWidth) out.push(['bad', 'Tu cara se ve muy chica. Acercá la cámara.']);
+      var nose = P[1], l = P[234], r = P[454], dl = Math.abs(nose.x - l.x), dr = Math.abs(r.x - nose.x), roll = rollOf(P, W, H);
+      m.giro = +(Math.min(dl, dr) / Math.max(dl, dr)).toFixed(2); m.inclinacion = +roll.toFixed(1);
+      if (Math.min(dl, dr) / Math.max(dl, dr) < PHOTO_RULES.minYawBalance) out.push(['bad', 'Tu cara está girada. Mirá de frente a la cámara.']);
+      else if (roll > PHOTO_RULES.maxRollDeg) out.push(['bad', 'La cabeza está inclinada. Mantenela derecha.']);
+      var bx = Math.max(0, minX * W), by = Math.max(0, minY * H), bw = Math.min(W, maxX * W) - bx, bh = Math.min(H, maxY * H) - by;
+      var q = imageStats(grayCrop(canvas, bx, by, bw, bh, 256));
+      m.nitidez = Math.round(q.sharpness); m.quemado = +q.clipHigh.toFixed(3); m.oscuro = +q.clipLow.toFixed(3); m.contraste = q.contrast;
+      if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto salió movida. Quedate quieta un segundo.']);
+      if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos en la cara. Buscá una luz más suave.']);
+      else if (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) out.push(['bad', 'La foto está muy oscura. Buscá más luz, de frente.']);
+      var sz = (maxX - minX) * W * 0.12;
+      var mL = meanLum(canvas, P[50].x * W - sz / 2, P[50].y * H - sz / 2, sz), mR = meanLum(canvas, P[280].x * W - sz / 2, P[280].y * H - sz / 2, sz);
+      m.luzLados = +(Math.max(mL, mR) / Math.max(1, Math.min(mL, mR))).toFixed(2);
+      return out;
+    }
+
+    /**
+     * Indicadores por zona con los puntos faciales: zona T contra mejillas (de frente) y la mejilla que se ve
+     * mejor en cada costado. Comparar zonas del mismo rostro reduce el efecto del tono de piel y de la luz
+     * general, pero no lo elimina: por eso los umbrales se calibran con fotos reales.
+     */
+    function zoneStats(canvas, P, ids) {
+      var W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d');
+      var xs = P.map(function (p) { return p.x; });
+      var size = Math.max(8, Math.round((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * W * 0.08));
+      var spec = 0, red = 0, n = 0, nRed = 0, tex = 0, cv = 0, spots = 0, pores = 0;
+      ids.forEach(function (i) {
+        var x = Math.max(0, Math.round(P[i].x * W - size / 2)), y = Math.max(0, Math.round(P[i].y * H - size / 2));
+        var d = ctx.getImageData(x, y, size, size).data;
+        for (var k = 0; k < d.length; k += 4) {
+          var r = d[k], g = d[k + 1], b = d[k + 2], lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          var mx = Math.max(r, g, b), mn = Math.min(r, g, b), sat = mx ? (mx - mn) / mx : 0;
+          n++;
+          if (lum >= 230 && sat < 0.25) { spec++; continue; } // reflejo especular (brillo): no cuenta para el color
+          red += (r - g) / (r + g + b + 1); nRed++;
+        }
+        var fine = grayCrop(canvas, x, y, size, size, 48);
+        tex += lapEnergy(grayCrop(canvas, x, y, size, size, 32)); cv += detrendedCv(grayCrop(canvas, x, y, size, size, 8));
+        spots += darkSpots(fine, 0.80, 12, 10); pores += darkSpots(fine, 0.90, 6, 4);
+      });
+      var m = ids.length;
+      return { spec: spec / n, red: nRed ? red / nRed : 0, tex: tex / m, cv: cv / m, spots: spots / m, pores: pores / m };
+    }
+    /** Puntos más oscuros que su entorno (fondo = desenfoque local), chicos y aislados. Densidad por 1000 px. */
+    function darkSpots(im, ratio, minDiff, maxArea) {
+      var g = im.g, w = im.w, h = im.h, rad = 4, bg = new Float32Array(g.length), mask = new Uint8Array(g.length);
+      for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+        var s = 0, c = 0;
+        for (var dy = -rad; dy <= rad; dy++) for (var dx = -rad; dx <= rad; dx++) {
+          var yy = y + dy, xx = x + dx; if (yy < 0 || xx < 0 || yy >= h || xx >= w) continue; s += g[yy * w + xx]; c++;
+        }
+        bg[y * w + x] = s / c;
+        var v = g[y * w + x]; mask[y * w + x] = (v < bg[y * w + x] * ratio && bg[y * w + x] - v > minDiff) ? 1 : 0;
+      }
+      var seen = new Uint8Array(g.length), count = 0;
+      for (var p = 0; p < g.length; p++) {
+        if (!mask[p] || seen[p]) continue;
+        var stack = [p], area = 0; seen[p] = 1;
+        while (stack.length) {
+          var q = stack.pop(); area++;
+          var qx = q % w, qy = (q / w) | 0;
+          [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (dd) {
+            var nx = qx + dd[0], ny = qy + dd[1], np = ny * w + nx;
+            if (nx >= 0 && ny >= 0 && nx < w && ny < h && mask[np] && !seen[np]) { seen[np] = 1; stack.push(np); }
+          });
+        }
+        if (area <= maxArea) count++;
+      }
+      return count / g.length * 1000;
+    }
+    function measureSkin(list) {
+      var front = list[0], R = SKIN_RULES, f = [];
+      var T = zoneStats(front.canvas, front.P, ZONE_T);
+      var C = zoneStats(front.canvas, front.P, CHEEK_R.concat(CHEEK_L));
+      var N = zoneStats(front.canvas, front.P, ZONE_NOSE), PO = zoneStats(front.canvas, front.P, ZONE_PORES);
+      // En los costados se mide la mejilla que queda hacia la cámara (la más ancha entre nariz y borde).
+      var tex = [C.tex], cv = [C.cv], pores = [PO.pores];
+      list.slice(1).forEach(function (s) {
+        var dl = Math.abs(s.P[1].x - s.P[234].x), dr = Math.abs(s.P[454].x - s.P[1].x);
+        var side = zoneStats(s.canvas, s.P, dl > dr ? CHEEK_R : CHEEK_L);
+        tex.push(side.tex); cv.push(side.cv); pores.push(side.pores);
+      });
+      var avg = function (a) { return a.reduce(function (x, y) { return x + y; }, 0) / a.length; };
+      var texA = avg(tex), cvA = avg(cv), poA = avg(pores);
+      var metrics = { fotos: list.length, brilloZonaT: +T.spec.toFixed(3), brilloMejillas: +C.spec.toFixed(3), rojezDif: +(C.red - T.red).toFixed(3),
+        texturaMejillas: +texA.toFixed(2), tonoMejillas: +cvA.toFixed(3), puntosNariz: +N.spots.toFixed(2), porosMejillas: +poA.toFixed(2) };
+      if (T.spec >= R.shineT && C.spec >= R.shineGeneralC) f.push('brillo_general');
+      else if (T.spec >= R.shineT && T.spec >= R.shineRatio * C.spec + 0.01) f.push('brillo_zona_t');
+      if (texA >= R.texture) f.push('textura_irregular');
+      if (cvA >= R.toneCv) f.push('tono_desparejo');
+      if (C.red - T.red >= R.rednessDiff) f.push('enrojecimiento_visible');
+      if (N.spots >= R.noseSpots) f.push('puntos_negros_posibles');
+      if (poA >= R.cheekPores) f.push('poros_visibles_posibles');
+      return { findings: f, metrics: metrics };
+    }
+
+    // 3. Cuestionario (4 preguntas; si no hubo foto, se suma la del brillo)
+    function startQuiz() { quiz = measured ? QUIZ : [QUIZ_NO_PHOTO].concat(QUIZ); qi = 0; show('quiz'); renderQuestion(); }
     function optionList(name, opts, multi, current) {
       var wrap = el('div');
       opts.forEach(function (o) {
@@ -552,299 +866,122 @@
       return wrap;
     }
     function renderQuestion() {
-      var q = QUIZ[qi], box = $('#aiQ');
-      $('#aiQStep').textContent = 'Pregunta ' + (qi + 1) + ' de ' + QUIZ.length;
-      $('#aiQBar').style.width = Math.round(qi / QUIZ.length * 100) + '%';
+      var q = quiz[qi], box = $('#aiQ');
+      $('#aiQStep').textContent = 'Pregunta ' + (qi + 1) + ' de ' + quiz.length;
+      $('#aiQBar').style.width = Math.round(qi / quiz.length * 100) + '%';
       box.innerHTML = ''; status($('#aiQStatus'), '');
       box.appendChild(el('legend', null, q.q));
       box.appendChild(optionList('q_' + q.k, q.o, q.multi, answers[q.k]));
-      if (q.follow) {
-        var f = el('div', 'ai-follow'); f.hidden = answers[q.k] !== q.follow.when;
-        f.appendChild(el('p', null, q.follow.q));
-        f.appendChild(optionList('q_' + q.follow.k, q.follow.o, false, answers[q.follow.k]));
-        box.appendChild(f);
-      }
       box.onchange = function (e) {
         var t = e.target;
-        if (t.name === 'q_' + q.k) {
-          if (q.multi) {
-            // "Nada en especial" y "No sé" excluyen el resto de las opciones.
-            var excl = ['nada', 'nose'];
-            $$('input[name="q_' + q.k + '"]', box).forEach(function (i) {
-              if (i === t || !t.checked) return;
-              if (excl.indexOf(t.value) >= 0 || excl.indexOf(i.value) >= 0) i.checked = false;
-            });
-            answers[q.k] = $$('input[name="q_' + q.k + '"]:checked', box).map(function (i) { return i.value; });
-          } else answers[q.k] = t.value;
-          if (q.follow) { var fb = $('.ai-follow', box); fb.hidden = answers[q.k] !== q.follow.when; if (fb.hidden) delete answers[q.follow.k]; }
-        } else if (q.follow && t.name === 'q_' + q.follow.k) answers[q.follow.k] = t.value;
+        if (q.multi) {
+          var all = $$('input[name="q_' + q.k + '"]', box), excl = q.exclusive || [];
+          all.forEach(function (i) { if (i !== t && t.checked && (excl.indexOf(t.value) >= 0 || excl.indexOf(i.value) >= 0)) i.checked = false; });
+          if (q.max && all.filter(function (i) { return i.checked; }).length > q.max) { t.checked = false; status($('#aiQStatus'), 'Elegí hasta ' + q.max + '.', 'error'); return; }
+          answers[q.k] = all.filter(function (i) { return i.checked; }).map(function (i) { return i.value; });
+        } else answers[q.k] = t.value;
         status($('#aiQStatus'), '');
       };
-      $('#aiQBack').textContent = qi === 0 ? 'Salir' : 'Atrás';
-      $('#aiQNext').textContent = qi === QUIZ.length - 1 ? 'Terminar' : 'Siguiente';
-      var first = $('input', box); if (first && document.activeElement && card.contains(document.activeElement)) first.focus({ preventScroll: true });
+      $('#aiQBack').textContent = 'Atrás';
+      $('#aiQNext').textContent = qi === quiz.length - 1 ? 'Terminar' : 'Siguiente';
     }
-    $('#aiQBack').addEventListener('click', function () { if (qi === 0) show('intro'); else { qi--; renderQuestion(); } });
+    $('#aiQBack').addEventListener('click', function () { if (qi === 0) show(measured ? 'camara' : 'intro'); else { qi--; renderQuestion(); } });
     $('#aiQNext').addEventListener('click', function () {
-      var q = QUIZ[qi], a = answers[q.k];
-      if (!a || (q.multi && !a.length)) { status($('#aiQStatus'), 'Elegí una opción para seguir.', 'error'); return; }
-      if (q.follow && a === q.follow.when && !answers[q.follow.k]) { status($('#aiQStatus'), 'Contanos cuáles para seguir.', 'error'); return; }
-      if (qi < QUIZ.length - 1) { qi++; renderQuestion(); return; }
+      var a = answers[quiz[qi].k];
+      if (!a || (Array.isArray(a) && !a.length)) { status($('#aiQStatus'), 'Elegí una opción para seguir.', 'error'); return; }
+      if (qi < quiz.length - 1) { qi++; renderQuestion(); return; }
       $('#aiQBar').style.width = '100%';
       Track.send('analisis_cuestionario_completo', { dedupeKey: 'analisis_cuestionario:' + PAGE_LOADED_AT });
-      openPhoto();
+      if (session) submit(); else show('datos');
     });
 
-    // 4. Foto opcional, con controles técnicos en el dispositivo
-    function openPhoto() {
-      show('foto');
-      if (!landmarker) loadLandmarker().catch(function () {}); // se precarga mientras la persona lee las indicaciones
-    }
-    function loadLandmarker() {
-      if (landmarker) return landmarker;
-      landmarker = import(MP_BASE + '/vision_bundle.mjs').then(function (v) {
-        return v.FilesetResolver.forVisionTasks(MP_BASE + '/wasm').then(function (fs) {
-          return v.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL }, runningMode: 'IMAGE', numFaces: 2 });
-        });
-      });
-      landmarker.catch(function () { landmarker = null; });
-      return landmarker;
-    }
-    ['#aiCam', '#aiFile'].forEach(function (id) {
-      $(id).addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
-    });
-    function resetPhotoUi() {
-      measured = null; $('#aiPreview').hidden = true; $('#aiChecks').innerHTML = '';
-      $('#aiSend').hidden = true; $('#aiDiag').hidden = true; status($('#aiStatus'), '');
-    }
-    function loadFile(f) {
-      resetPhotoUi();
-      if (!f) return;
-      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { status($('#aiStatus'), 'Elegí una foto (JPG o PNG).', 'error'); return; }
-      if (f.size > 25 * 1024 * 1024) { status($('#aiStatus'), 'La foto es muy pesada. Probá con otra.', 'error'); return; }
-      var url = URL.createObjectURL(f), img = new Image();
-      img.onload = function () {
-        var max = 1024, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
-        var c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // respeta la orientación EXIF y no copia metadatos
-        URL.revokeObjectURL(url);
-        $('#aiPreviewImg').src = c.toDataURL('image/jpeg', 0.85); $('#aiPreview').hidden = false;
-        if (Math.min(w, h) < 480) return rejectPhoto([['bad', 'La foto tiene poca resolución. Probá con la cámara del teléfono.']], null);
-        checkPhoto(c);
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); status($('#aiStatus'), 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
-      img.src = url;
-    }
-    function renderChecks(list) {
-      var ul = $('#aiChecks'); ul.innerHTML = '';
-      list.forEach(function (c) { ul.appendChild(el('li', 'is-' + c[0], c[1])); });
-    }
-    function rejectPhoto(list, diag) {
-      renderChecks(list); showDiag(diag);
-      status($('#aiStatus'), 'Esta foto no sirve para la orientación. Sacá otra siguiendo las indicaciones, o seguí sin foto.', 'error');
-      Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
-    }
-    function checkPhoto(canvas) {
-      renderChecks([['info', 'Revisando la foto…']]);
-      Promise.resolve(loadLandmarker()).then(function (lm) {
-        var res = lm.detect(canvas), faces = res && res.faceLandmarks || [];
-        var diag = { controles: {} };
-        var list = evaluatePhoto(canvas, faces, diag.controles);
-        if (list.some(function (c) { return c[0] === 'bad'; })) return rejectPhoto(list, diag);
-        measured = measureSkin(canvas, faces[0]);
-        diag.indicadores = measured.metrics; diag.hallazgos = measured.findings;
-        renderChecks(list); showDiag(diag);
-        $('#aiSend').hidden = false; status($('#aiStatus'), '');
-        Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
-      }).catch(function () {
-        renderChecks([['warn', 'No pudimos revisar la foto en este dispositivo.']]);
-        status($('#aiStatus'), 'Sin poder revisar la foto no la usamos. Podés seguir sin foto.', 'error');
-      });
-    }
-    function showDiag(d) {
-      var box = $('#aiDiag'); if (!DIAG || !d) { box.hidden = true; return; }
-      box.textContent = JSON.stringify(d, null, 1); box.hidden = false;
-    }
-    function evaluatePhoto(canvas, faces, m) {
-      if (!faces.length) return [['bad', 'No encontramos un rostro. Ponete de frente y que se vea toda tu cara.']];
-      if (faces.length > 1) return [['bad', 'Se ve más de una persona. Tiene que aparecer solo tu cara.']];
-      var P = faces[0], W = canvas.width, H = canvas.height, out = [];
-      var xs = P.map(function (p) { return p.x; }), ys = P.map(function (p) { return p.y; });
-      var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
-      m.anchoRostro = +(maxX - minX).toFixed(3);
-      if (minX < 0 || minY < 0 || maxX > 1 || maxY > 1) out.push(['bad', 'Tu cara quedó cortada. Alejá un poco la cámara.']);
-      else if (maxX - minX < PHOTO_RULES.minFaceWidth) out.push(['bad', 'Tu cara se ve muy chica. Acercá la cámara.']);
-      else out.push(['ok', 'Un solo rostro, bien encuadrado.']);
-      // Orientación: nariz centrada entre los bordes del rostro (giro) y ojos nivelados (inclinación).
-      var nose = P[1], l = P[234], r = P[454], eL = P[33], eR = P[263];
-      var dl = Math.abs(nose.x - l.x), dr = Math.abs(r.x - nose.x), roll = Math.abs(Math.atan2((eR.y - eL.y) * H, (eR.x - eL.x) * W) * 180 / Math.PI);
-      m.giro = +(Math.min(dl, dr) / Math.max(dl, dr)).toFixed(2); m.inclinacion = +roll.toFixed(1);
-      if (Math.min(dl, dr) / Math.max(dl, dr) < PHOTO_RULES.minYawBalance) out.push(['bad', 'Tu cara está girada. Mirá de frente a la cámara.']);
-      else if (roll > PHOTO_RULES.maxRollDeg) out.push(['bad', 'La cabeza está inclinada. Mantenela derecha.']);
-      else out.push(['ok', 'Mirada de frente.']);
-      // Nitidez y exposición sobre el recorte del rostro.
-      var bx = Math.max(0, minX * W), by = Math.max(0, minY * H), bw = Math.min(W, maxX * W) - bx, bh = Math.min(H, maxY * H) - by;
-      var g = grayCrop(canvas, bx, by, bw, bh, 256);
-      var q = imageStats(g);
-      m.nitidez = Math.round(q.sharpness); m.quemado = +q.clipHigh.toFixed(3); m.oscuro = +q.clipLow.toFixed(3); m.contraste = q.contrast;
-      if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto está movida o desenfocada. Sostené el teléfono quieto.']);
-      else out.push(['ok', 'Foto nítida.']);
-      if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos en la cara. Buscá una luz más suave.']);
-      else if (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) out.push(['bad', 'La foto está muy oscura. Buscá más luz, de frente.']);
-      else out.push(['ok', 'Luz suficiente.']);
-      // Luz despareja entre mejillas: aviso, no bloquea.
-      var s = (maxX - minX) * W * 0.12;
-      var mL = meanLum(canvas, P[50].x * W - s / 2, P[50].y * H - s / 2, s), mR = meanLum(canvas, P[280].x * W - s / 2, P[280].y * H - s / 2, s);
-      m.luzLados = +(Math.max(mL, mR) / Math.max(1, Math.min(mL, mR))).toFixed(2);
-      if (Math.max(mL, mR) / Math.max(1, Math.min(mL, mR)) > PHOTO_RULES.maxCheekRatio) out.push(['warn', 'La luz llega más de un lado. Si podés, ponete de frente a la ventana.']);
-      out.push(['info', 'No podemos detectar maquillaje ni filtros: si usaste alguno, mejor sacá otra.']);
-      return out;
-    }
+    // 4. Datos de contacto, antes de ver el resultado
+    bindLeadForm({ form: $('#aiLead'), btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
+      onSaved: function () {
+        submit();
+        if (!store.get('sessionStorage', 'cc_booking')) prepareScheduling();
+      } });
 
-    /**
-     * Indicadores por zona con los puntos faciales (índices de la malla de MediaPipe):
-     * frente y nariz (zona T) contra mejillas. Comparar zonas del mismo rostro reduce el efecto del tono
-     * de piel y de la luz general, pero no lo elimina: por eso los umbrales se calibran con fotos reales.
-     */
-    var ZONE_T = [151, 108, 337, 4, 195, 5], ZONE_CHEEKS = [50, 117, 205, 280, 346, 425];
-    function measureSkin(canvas, P) {
-      var W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d');
-      var xs = P.map(function (p) { return p.x; });
-      var size = Math.max(8, Math.round((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * W * 0.08));
-      function patch(i) {
-        var x = Math.round(P[i].x * W - size / 2), y = Math.round(P[i].y * H - size / 2);
-        return { x: Math.max(0, x), y: Math.max(0, y) };
-      }
-      function zone(ids) {
-        var spec = 0, red = 0, n = 0, nRed = 0, tex = 0, cv = 0;
-        ids.forEach(function (i) {
-          var pt = patch(i), d = ctx.getImageData(pt.x, pt.y, size, size).data;
-          for (var k = 0; k < d.length; k += 4) {
-            var r = d[k], g = d[k + 1], b = d[k + 2], y = 0.299 * r + 0.587 * g + 0.114 * b;
-            var mx = Math.max(r, g, b), mn = Math.min(r, g, b), sat = mx ? (mx - mn) / mx : 0;
-            n++;
-            if (y >= 230 && sat < 0.25) { spec++; continue; } // reflejo especular (brillo): no cuenta para el color
-            red += (r - g) / (r + g + b + 1); nRed++;
-          }
-          var fine = grayCrop(canvas, pt.x, pt.y, size, size, 32), coarse = grayCrop(canvas, pt.x, pt.y, size, size, 8);
-          tex += lapEnergy(fine); cv += detrendedCv(coarse);
-        });
-        return { spec: spec / n, red: nRed ? red / nRed : 0, tex: tex / ids.length, cv: cv / ids.length };
-      }
-      var T = zone(ZONE_T), C = zone(ZONE_CHEEKS), R = SKIN_RULES, f = [];
-      var metrics = { brilloZonaT: +T.spec.toFixed(3), brilloMejillas: +C.spec.toFixed(3), rojezDif: +(C.red - T.red).toFixed(3),
-        texturaMejillas: +C.tex.toFixed(2), tonoMejillas: +C.cv.toFixed(3) };
-      if (T.spec >= R.shineT && C.spec >= R.shineGeneralC) f.push('brillo_general');
-      else if (T.spec >= R.shineT && T.spec >= R.shineRatio * C.spec + 0.01) f.push('brillo_zona_t');
-      if (C.tex >= R.texture) f.push('textura_irregular');
-      if (C.cv >= R.toneCv) f.push('tono_desparejo');
-      if (C.red - T.red >= R.rednessDiff) f.push('enrojecimiento_visible');
-      return { findings: f, metrics: metrics };
-    }
-    function lapEnergy(im) {
-      var g = im.g, w = im.w, h = im.h, s = 0, m = 0, mean = 0;
-      for (var i = 0; i < g.length; i++) mean += g[i];
-      mean /= g.length;
-      for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
-        var p = y * w + x; s += Math.abs(g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p]); m++;
-      }
-      return m ? (s / m) / (mean + 1) * 100 : 0; // relativo al brillo de la zona
-    }
-    // Variación del tono descontando la luz que cambia de a poco (plano a + b·x + c·y ajustado por mínimos
-    // cuadrados): así la sombra natural de la mejilla no cuenta como "tono desparejo".
-    function detrendedCv(im) {
-      var g = im.g, w = im.w, h = im.h, n = g.length, mean = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxg = 0, syg = 0;
-      for (var i = 0; i < n; i++) mean += g[i];
-      mean /= n;
-      for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
-        var cx = x - (w - 1) / 2, cy = y - (h - 1) / 2, v = g[y * w + x] - mean;
-        sxx += cx * cx; syy += cy * cy; sxg += cx * v; syg += cy * v;
-      }
-      var b = sxx ? sxg / sxx : 0, c = syy ? syg / syy : 0, res = 0;
-      for (var y2 = 0; y2 < h; y2++) for (var x2 = 0; x2 < w; x2++) {
-        var r = g[y2 * w + x2] - mean - b * (x2 - (w - 1) / 2) - c * (y2 - (h - 1) / 2);
-        res += r * r;
-      }
-      return mean ? Math.sqrt(res / n) / mean : 0;
-    }
-    function grayCrop(canvas, x, y, w, h, size) {
-      var k = size / Math.max(1, w), c = document.createElement('canvas');
-      c.width = size; c.height = Math.max(1, Math.round(h * k));
-      c.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, c.width, c.height);
-      var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, g = new Float32Array(c.width * c.height);
-      for (var i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      return { g: g, w: c.width, h: c.height };
-    }
-    function imageStats(im) {
-      var g = im.g, w = im.w, h = im.h, n = g.length, hi = 0, lo = 0, hist = new Uint32Array(256), sum = 0, sum2 = 0, m = 0;
-      for (var i = 0; i < n; i++) { var v = g[i] | 0; hist[v]++; if (v >= 250) hi++; if (v <= 15) lo++; }
-      for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
-        var p = y * w + x, lap = g[p - w] + g[p + w] + g[p - 1] + g[p + 1] - 4 * g[p];
-        sum += lap; sum2 += lap * lap; m++;
-      }
-      var pct = function (t) { var acc = 0; for (var k = 0; k < 256; k++) { acc += hist[k]; if (acc >= n * t) return k; } return 255; };
-      return { clipHigh: hi / n, clipLow: lo / n, contrast: pct(0.95) - pct(0.05), sharpness: m ? (sum2 / m - Math.pow(sum / m, 2)) : 0 };
-    }
-    function meanLum(canvas, x, y, s) {
-      var im = grayCrop(canvas, Math.max(0, x), Math.max(0, y), Math.max(1, s), Math.max(1, s), 24), t = 0;
-      for (var i = 0; i < im.g.length; i++) t += im.g[i];
-      return t / im.g.length;
-    }
-    $('#aiSend').addEventListener('click', function () { if (measured) submit(true); });
-    $('#aiSkip').addEventListener('click', function () { submit(false); });
-
-    // Envío: el servidor aplica las reglas (y la IA, si hay foto) y guarda solo el resultado.
-    function submit(withPhoto) {
+    // Envío: el servidor aplica las reglas y guarda el resultado. Las fotos nunca se envían.
+    function submit() {
       if (busy) return;
-      var btn = withPhoto ? $('#aiSend') : $('#aiSkip');
-      busy = true; setBusy(btn, true, 'Preparando tu orientación…');
-      // Al servidor van las respuestas y, si hubo foto, solo lo medido en el teléfono (nunca la imagen).
+      busy = true;
       var body = { requestId: session && session.requestId, token: session && session.token, adult: true, answers: answers };
-      if (withPhoto) body.photo = { findings: measured.findings, metrics: measured.metrics };
+      if (measured) body.photo = { findings: measured.findings, metrics: measured.metrics };
       api('analyze', body, 30000).then(function (r) {
-        busy = false; setBusy(btn, false);
+        busy = false;
         if (r.code === 'invalid_token') {
           store.del('sessionStorage', 'cc_lead'); session = null; show('datos');
           status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos.', 'error'); return;
         }
-        if (!r.ok) { status(withPhoto ? $('#aiStatus') : $('#aiQStatus'), 'No pudimos preparar tu orientación. Probá de nuevo en un momento.', 'error'); return; }
+        if (!r.ok) { show(session ? 'quiz' : 'datos'); status(session ? $('#aiQStatus') : $('#aiLeadStatus'), 'No pudimos preparar tu resultado. Probá de nuevo en un momento.', 'error'); return; }
         renderResult(r);
         Track.send('analisis_resultado', { dedupeKey: 'analisis_resultado:' + PAGE_LOADED_AT });
       });
     }
 
     // 5. Resultado: cada conclusión muestra su origen
-    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto': 'Según tu foto', 'evaluación presencial': 'En la consulta' };
-    function origin(o) { var s = el('span', 'ai-origin' + (o === 'foto' ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); return s; }
+    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto': 'Según tus fotos', 'foto y cuestionario': 'Según tus fotos y respuestas', 'evaluación presencial': 'En la consulta' };
+    function origin(o) { return el('span', 'ai-origin' + (/foto/.test(o) ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); }
     function block(title, items, cls) {
       var b = el('div', 'ai-block' + (cls ? ' ' + cls : '')); b.appendChild(el('h4', null, title));
       var ul = el('ul', 'ai-focus');
-      items.forEach(function (i) { var li = el('li', null, i.text + ' '); li.appendChild(origin(i.origin)); ul.appendChild(li); });
+      items.forEach(function (i) {
+        var li = el('li', null, i.text + ' ');
+        if (i.beta) li.appendChild(el('span', 'ai-beta', 'Análisis en prueba'));
+        li.appendChild(origin(i.origin)); ul.appendChild(li);
+      });
       b.appendChild(ul); return b;
+    }
+    /** Dibujo de las zonas que realmente se midieron en la foto de frente (no es un mapa de lesiones). */
+    function zonesFigure(findings) {
+      var front = shots[0]; if (!front) return null;
+      var src = front.canvas, P = front.P, k = 280 / src.width, c = document.createElement('canvas');
+      c.width = 280; c.height = Math.round(src.height * k);
+      var x = c.getContext('2d'); x.save(); x.translate(c.width, 0); x.scale(-1, 1); x.drawImage(src, 0, 0, c.width, c.height); x.restore();
+      var xs = P.map(function (p) { return p.x; }), r = (Math.max.apply(null, xs) - Math.min.apply(null, xs)) * c.width * 0.07;
+      function mark(ids, hit) {
+        ids.forEach(function (i) {
+          x.beginPath(); x.arc((1 - P[i].x) * c.width, P[i].y * c.height, r, 0, Math.PI * 2);
+          x.lineWidth = 2; x.strokeStyle = hit ? '#f0b429' : 'rgba(255,255,255,.85)'; x.fillStyle = hit ? 'rgba(240,180,41,.25)' : 'rgba(255,255,255,.08)';
+          x.fill(); x.stroke();
+        });
+      }
+      var has = function (k2) { return findings.indexOf(k2) >= 0; };
+      mark(ZONE_T, has('brillo_zona_t') || has('brillo_general'));
+      mark(CHEEK_R.concat(CHEEK_L), has('textura_irregular') || has('tono_desparejo') || has('enrojecimiento_visible') || has('brillo_general') || has('poros_visibles_posibles'));
+      mark([48, 278], has('puntos_negros_posibles'));
+      var fig = el('figure', 'ai-zones'); fig.appendChild(c);
+      fig.appendChild(el('figcaption', null, 'Zonas medidas en tu foto. En amarillo, donde se identificó algo.'));
+      return fig;
+    }
+    function waSummary(r) {
+      var obs = r.observations.map(function (o) { return o.text.replace(/\.$/, '').toLowerCase(); });
+      return 'Hola, hice la evaluación de piel con IA en la web. Resultado orientativo: piel ' + r.profile.type.toLowerCase() + '.' +
+        (obs.length ? ' Identificado: ' + obs.join('; ') + '.' : '') +
+        (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '') + ' Quisiera recibir mi resultado y consultar.';
     }
     function renderResult(r) {
       var out = $('#aiResult'); out.innerHTML = '';
-      if (r.example) out.appendChild(el('p', 'ai-example', 'Resultado de ejemplo (vista previa): no se analizó nada.'));
-      // A. Perfil referido
+      if (r.example) out.appendChild(el('p', 'ai-example', 'Resultado de ejemplo (vista previa): el perfil es fijo; las fotos sí se midieron en este dispositivo.'));
       var head = el('div', 'ai-result-head'), h = el('h3');
       if (r.profile.type !== 'Indeterminada') { h.appendChild(document.createTextNode('Tu piel parece ')); h.appendChild(el('strong', null, r.profile.type.toLowerCase())); }
       else h.textContent = 'Tipo de piel por definir en la consulta';
       head.appendChild(h); head.appendChild(origin(r.profile.origin)); out.appendChild(head);
       if (r.profile.warning) out.appendChild(el('p', 'ai-warn', r.profile.warning));
-      // B. Necesidades referidas
-      if (r.needs.length) out.appendChild(block('Lo que contaste de tu piel', r.needs));
-      // C. Observaciones de la foto
-      var c = el('div', 'ai-block'); c.appendChild(el('h4', null, 'Lo que se ve en tu foto'));
-      if (r.photo === 'analizada' && r.observations.length) {
-        var ul = el('ul', 'ai-obs'); r.observations.forEach(function (o) { var li = el('li', null, o.text + ' '); li.appendChild(origin(o.origin)); ul.appendChild(li); });
-        c.appendChild(ul);
-        if (r.photoLimits) c.appendChild(el('p', 'ai-note', r.photoLimits));
-      } else {
-        c.appendChild(el('p', 'ai-note', r.photo === 'analizada' ? 'En la foto no se midieron diferencias claras de brillo, textura o tono.' :
-          'No sumaste foto: la orientación sale de tus respuestas.'));
-      }
+      var c = el('div', 'ai-block'); c.appendChild(el('h4', null, 'Lo que identificamos en tu piel'));
+      if (r.photo === 'analizada') {
+        var fig = zonesFigure(r.observations.map(function (o) { return o.rule.replace(/^OBS-/, ''); }));
+        if (fig) c.appendChild(fig);
+        if (r.observations.length) {
+          var ul = el('ul', 'ai-focus');
+          r.observations.forEach(function (o) { var li = el('li', null, o.text + ' '); if (o.beta) li.appendChild(el('span', 'ai-beta', 'Análisis en prueba')); ul.appendChild(li); });
+          c.appendChild(ul);
+        } else c.appendChild(el('p', 'ai-note', 'En tus fotos no se midieron diferencias claras de brillo, textura o tono.'));
+        c.appendChild(el('p', 'ai-note', r.photoLimits));
+      } else c.appendChild(el('p', 'ai-note', 'No sumaste fotos: la orientación sale de tus respuestas.'));
       out.appendChild(c);
-      // D. Qué podría aportar una limpieza facial
+      if (r.needs.length) out.appendChild(block('Lo que contaste de tu piel', r.needs));
       var d = block('Qué podría aportarte una limpieza facial', r.benefits);
       r.limits.forEach(function (l) { d.appendChild(el('p', 'ai-note', l.text)); });
       out.appendChild(d);
@@ -854,12 +991,18 @@
         var ul3 = el('ul', 'ai-tipsout'); r.tips.forEach(function (x) { ul3.appendChild(el('li', null, x.text)); }); t.appendChild(ul3); out.appendChild(t);
       }
       out.appendChild(el('p', 'ai-disclaimer', 'Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.'));
-      // F. Próximo paso
       var acts = el('div', 'ai-actions');
+      var wa = String(r.whatsapp || CFG.WHATSAPP_NUMBER || '').replace(/\D/g, '');
+      if (wa) {
+        var w = el('a', 'btn btn-wa', 'Recibir mi resultado por WhatsApp'); w.target = '_blank'; w.rel = 'noopener';
+        w.href = 'https://wa.me/' + wa + '?text=' + encodeURIComponent(waSummary(r));
+        w.addEventListener('click', function () { Track.send('analisis_whatsapp', { dedupeKey: 'analisis_whatsapp:' + PAGE_LOADED_AT }); });
+        acts.appendChild(w);
+      }
       var cta = el('a', 'btn', 'Reservá tu sesión'); cta.href = '#reservar';
       cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
       var again = el('button', 'btn btn-ghost', 'Volver a empezar'); again.type = 'button';
-      again.addEventListener('click', function () { answers = {}; resetPhotoUi(); startQuiz(); });
+      again.addEventListener('click', function () { answers = {}; resetShots(); show('intro'); });
       acts.appendChild(cta); acts.appendChild(again); out.appendChild(acts);
       show('resultado'); out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -900,15 +1043,16 @@
   (function sticky() {
     var bar = $('#stickyCta'), heroCta = $('.hero .btn-lg'), booking = $('#reservar');
     if (!('IntersectionObserver' in window)) return;
-    var heroVisible = true, bookingVisible = false;
+    var heroVisible = true, bookingVisible = false, aiVisible = false;
     function update() {
-      var show = !heroVisible && !bookingVisible;
+      var show = !heroVisible && !bookingVisible && !aiVisible; // no tapar la cámara ni el resultado de la evaluación
       bar.classList.toggle('is-visible', show); bar.setAttribute('aria-hidden', String(!show));
       $('a', bar).tabIndex = show ? 0 : -1;
       document.documentElement.style.setProperty('--sticky-h', show && window.innerWidth < 900 ? '76px' : '0px');
     }
     new IntersectionObserver(function (e) { heroVisible = e[0].isIntersecting; update(); }).observe(heroCta);
     new IntersectionObserver(function (e) { bookingVisible = e[0].isIntersecting; update(); }, { rootMargin: '0px 0px -30% 0px' }).observe(booking);
+    new IntersectionObserver(function (e) { aiVisible = e[0].isIntersecting; update(); }).observe($('#analisis .ai-tool'));
   })();
 
 

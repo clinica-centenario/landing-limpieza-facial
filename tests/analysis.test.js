@@ -3,10 +3,11 @@ const assert = require('node:assert/strict');
 const { createEnv } = require('./harness');
 
 const LEAD = { action: 'lead', firstName: 'Ana', lastName: 'Pérez', phone: '099 123 456', email: 'ana@example.com', consent: true, elapsedMs: 9000, origin: 'analisis' };
-const QUIZ = { brillo: 'zona_t', tirantez: 'aveces', descamacion: 'no', reactividad: 'aveces', imperfecciones: ['puntos_negros', 'poros'],
-  objetivo: 'suavidad', exfoliantes: 'no', procedimiento: 'no', lesiones: 'no' };
+// Sin foto se suma la pregunta del brillo; con foto, el brillo lo mide el teléfono.
+const QUIZ = { brillo: 'zona_t', sequedad: 'aveces', reactividad: 'aveces', mejorar: ['puntos_negros', 'poros'], aplica: ['ninguna'] };
+const QUIZ_PHOTO = { sequedad: 'aveces', reactividad: 'aveces', mejorar: ['puntos_negros', 'suavidad'], aplica: ['ninguna'] };
 const PHOTO = { findings: ['brillo_zona_t', 'textura_irregular'],
-  metrics: { brilloZonaT: 0.081, brilloMejillas: 0.012, rojezDif: 0.01, texturaMejillas: 8.4, tonoMejillas: 0.05 } };
+  metrics: { fotos: 3, brilloZonaT: 0.081, brilloMejillas: 0.012, rojezDif: 0.01, texturaMejillas: 8.4, tonoMejillas: 0.05, puntosNariz: 1.2, porosMejillas: 3 } };
 
 function env0() {
   const env = createEnv();
@@ -20,36 +21,59 @@ function env0() {
 const rows = (env) => { const r = env.state.sheets['Análisis de piel']; return r.slice(1).map(x => Object.fromEntries(r[0].map((k, i) => [k, x[i]]))); };
 const dump = (env) => JSON.stringify(env.state.sheets) + JSON.stringify(env.state.props) + JSON.stringify(env.state.cache) + env.state.logs.join();
 
-test('orientación sin foto: perfil, necesidades y beneficios con su origen; no guarda respuestas', () => {
+test('sin fotos: perfil, necesidades y beneficios con su origen; no guarda respuestas', () => {
   const env = env0();
   const r = env.analyze();
   assert.equal(r.ok, true); assert.equal(r.photo, 'sin_foto'); assert.equal(r.photoLimits, '');
   assert.equal(r.profile.type, 'Mixta'); assert.equal(r.profile.origin, 'cuestionario'); assert.equal(r.profile.warning, '');
   assert.ok(r.needs.some(n => n.rule === 'NEC-SENS-2') && r.needs.some(n => n.rule === 'NEC-HID-1'));
-  assert.deepEqual(r.benefits.map(b => b.rule).sort(), ['BEN-BRI', 'BEN-PN', 'BEN-POR', 'BEN-TEX'].sort());
+  assert.deepEqual(r.benefits.map(b => b.rule).sort(), ['BEN-BRI', 'BEN-PN', 'BEN-POR']);
   assert.ok(r.benefits.every(b => b.origin === 'cuestionario'));
   assert.ok(r.limits.length === 1 && r.tips.length <= 3 && r.observations.length === 0);
+  assert.equal(r.whatsapp, '', 'devuelve el WhatsApp de la planilla (vacío en la prueba)');
   const row = rows(env)[0];
-  assert.equal(row['ID solicitud'], env.lead.requestId); assert.match(row['Tipo de piel (orientativo)'], /^Mixta \[cuestionario · TIPO-04\]/);
-  assert.equal(row['Foto'], 'Sin foto'); assert.equal(row['Versión de reglas'], 'v1-2026-11'); assert.equal(row['Mediciones de la foto'], '');
-  assert.ok(!/zona_t"|aveces|puntos_negros/.test(dump(env)), 'las respuestas crudas no se guardan');
+  assert.equal(row['ID solicitud'], env.lead.requestId);
+  assert.match(row['Tipo de piel (orientativo)'], /^Mixta \[cuestionario · TIPO-04\]/);
+  assert.equal(row['Foto'], 'Sin foto'); assert.equal(row['Versión de reglas'], 'v2-2026-11'); assert.equal(row['Mediciones de la foto'], '');
+  assert.ok(!/zona_t"|aveces|"puntos_negros"/.test(dump(env)), 'las respuestas crudas no se guardan');
 });
 
-test('foto medida en el teléfono: observaciones con textos fijos, beneficios según la foto y números para calibrar', () => {
+test('con fotos: el brillo medido define el tipo junto con las respuestas', () => {
   const env = env0();
-  const r = env.analyze({ photo: PHOTO });
-  assert.equal(r.photo, 'analizada'); assert.match(r.photoLimits, /luz y la cámara/);
+  const r = env.analyze({ answers: QUIZ_PHOTO, photo: PHOTO });
+  assert.equal(r.profile.type, 'Mixta'); assert.equal(r.profile.origin, 'foto y cuestionario');
+  const oily = env.analyze({ answers: { ...QUIZ, sequedad: 'no' }, photo: { findings: ['brillo_general'], metrics: {} } });
+  assert.equal(oily.profile.type, 'Grasa', 'con foto, el brillo medido manda sobre la pregunta');
+  const none = env.analyze({ answers: { ...QUIZ_PHOTO, sequedad: 'no' }, photo: { findings: [], metrics: {} } });
+  assert.equal(none.profile.type, 'Normal'); assert.match(none.profile.warning, /no se midió brillo/);
+  const mixed = env.analyze({ answers: { ...QUIZ_PHOTO, sequedad: 'siempre' }, photo: { findings: ['brillo_general'], metrics: {} } });
+  assert.equal(mixed.profile.type, 'Mixta'); assert.equal(mixed.profile.rule, 'TIPO-02'); assert.match(mixed.profile.warning, /no son del todo coincidentes/);
+});
+
+test('con fotos: textos fijos por indicador, origen de cada beneficio y números para calibrar', () => {
+  const env = env0();
+  const r = env.analyze({ answers: QUIZ_PHOTO, photo: PHOTO });
+  assert.equal(r.photo, 'analizada'); assert.match(r.photoLimits, /mediciones de tus fotos/);
   assert.deepEqual(r.observations.map(o => o.rule), ['OBS-brillo_zona_t', 'OBS-textura_irregular']);
-  assert.ok(r.observations.every(o => o.origin === 'foto'));
+  assert.ok(r.observations.every(o => o.origin === 'foto' && !o.beta));
   assert.equal(r.benefits.find(b => b.rule === 'BEN-BRI').origin, 'foto');
-  assert.equal(r.benefits.find(b => b.rule === 'BEN-TEX').origin, 'foto');
-  assert.equal(r.profile.origin, 'cuestionario', 'el tipo de piel nunca sale de la foto');
+  assert.equal(r.benefits.find(b => b.rule === 'BEN-TEX').origin, 'foto y cuestionario');
+  assert.equal(r.benefits.find(b => b.rule === 'BEN-PN').origin, 'cuestionario', 'puntos negros: lo marcó la persona');
   assert.equal(r.photoMetrics, undefined, 'los números no vuelven al navegador');
   const row = rows(env)[0];
   assert.equal(row['Foto'], 'Medida en el teléfono (no enviada ni guardada)');
   assert.deepEqual(JSON.parse(row['Mediciones de la foto']), PHOTO.metrics);
   assert.match(row['Observaciones de la foto'], /\[foto · OBS-brillo_zona_t\]/);
   assert.equal(env.sent.length, 0, 'no se llama a ningún servicio externo');
+});
+
+test('puntos negros y poros: análisis en prueba, marcados como tales', () => {
+  const env = env0();
+  const r = env.analyze({ answers: QUIZ_PHOTO, photo: { findings: ['puntos_negros_posibles', 'poros_visibles_posibles'], metrics: {} } });
+  assert.ok(r.observations.length === 2 && r.observations.every(o => o.beta === true));
+  assert.equal(r.benefits.find(b => b.rule === 'BEN-PN').origin, 'foto y cuestionario');
+  assert.equal(r.benefits.find(b => b.rule === 'BEN-POR').origin, 'foto');
+  assert.ok(r.toEvaluate.some(e => e.rule === 'EVA-BETA'));
 });
 
 test('foto: descarta categorías desconocidas, números raros y una imagen enviada por error', () => {
@@ -60,26 +84,25 @@ test('foto: descarta categorías desconocidas, números raros y una imagen envia
   assert.equal(env.analyze({ image: 'A'.repeat(4000) }).code, 'invalid_request', 'la imagen nunca debe llegar al servidor');
 });
 
-test('respuestas contradictorias: muestra el tipo más probable con aviso', () => {
+test('respuestas: máximo 2 cosas para mejorar y "Ninguna" excluye al resto', () => {
   const env = env0();
-  const r = env.analyze({ answers: { ...QUIZ, brillo: 'toda', tirantez: 'siempre', descamacion: 'si' } });
-  assert.equal(r.profile.type, 'Mixta'); assert.equal(r.profile.rule, 'TIPO-02'); assert.match(r.profile.warning, /no son del todo coincidentes/);
-  assert.ok(r.toEvaluate.some(e => e.rule === 'EVA-TIPO'));
+  const many = env.analyze({ answers: { ...QUIZ, mejorar: ['poros', 'brillo', 'suavidad'] } });
+  assert.ok(!many.benefits.some(b => b.rule === 'BEN-TEX'), 'la tercera opción se descarta');
+  const bad = env.analyze({ answers: { brillo: 'mucho', mejorar: ['cicatrices'], aplica: ['ninguna', 'exfoliantes'] } });
+  assert.ok(!bad.toEvaluate.some(e => e.rule === 'EVA-EXF'));
 });
 
 test('respuestas incompletas o "No sé": no se inventa un perfil', () => {
   const env = env0();
-  const r = env.analyze({ answers: { lesiones: 'no' } });
+  const r = env.analyze({ answers: { aplica: ['ninguna'] } });
   assert.equal(r.profile.type, 'Indeterminada'); assert.ok(r.profile.warning);
   assert.equal(r.needs.length, 0, 'sin datos no se afirma ausencia ni presencia');
   assert.deepEqual(r.benefits.map(b => b.rule), ['BEN-LIMP']);
-  const bad = env.analyze({ answers: { brillo: 'mucho', imperfecciones: ['granitos', 'cicatrices'], exfoliantes_cual: 'retinoide' } });
-  assert.equal(bad.profile.type, 'Indeterminada'); assert.ok(!bad.toEvaluate.some(e => e.rule === 'EVA-EXF'), 'condicional sin su pregunta madre se descarta');
 });
 
 test('lesiones, retinoides o procedimientos: quedan para evaluar en la consulta, sin derivar ni nombrar condiciones', () => {
   const env = env0();
-  const r = env.analyze({ answers: { ...QUIZ, lesiones: 'si', exfoliantes: 'si', exfoliantes_cual: 'retinoide', procedimiento: 'si', procedimiento_tipo: 'medico', reactividad: 'seguido' } });
+  const r = env.analyze({ answers: { ...QUIZ, aplica: ['lesiones', 'exfoliantes', 'procedimiento'], reactividad: 'seguido' } });
   assert.deepEqual(r.toEvaluate.map(e => e.rule), ['EVA-LES', 'EVA-SENS', 'EVA-EXF', 'EVA-PROC']);
   assert.ok(!/\bm[eé]dic[oa]s?\b|dermat[oó]log|deriv/i.test(JSON.stringify(r)), 'no deriva ni nombra especialidades');
   assert.ok(r.tips.some(t => t.rule === 'TIP-SENS'));
@@ -87,9 +110,8 @@ test('lesiones, retinoides o procedimientos: quedan para evaluar en la consulta,
 
 test('enrojecimiento medido en la foto: se adapta a la tolerancia, sin nombrar condiciones', () => {
   const env = env0();
-  const r = env.analyze({ answers: { ...QUIZ, reactividad: 'no' }, photo: { findings: ['enrojecimiento_visible'], metrics: {} } });
-  const ev = r.toEvaluate.find(e => e.rule === 'EVA-SENS');
-  assert.equal(ev.origin, 'foto');
+  const r = env.analyze({ answers: { ...QUIZ_PHOTO, reactividad: 'no' }, photo: { findings: ['enrojecimiento_visible'], metrics: {} } });
+  assert.equal(r.toEvaluate.find(e => e.rule === 'EVA-SENS').origin, 'foto');
 });
 
 test('requisitos: mayoría de edad y datos de contacto guardados', () => {

@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Poppins:wght@600;700&display=swap" rel="stylesheet">
   <link rel="preload" as="image" type="image/avif" imagesrcset="img/hero-480.avif 480w, img/hero-800.avif 800w, img/hero-1080.avif 1080w" imagesizes="(min-width: 900px) 520px, 100vw" fetchpriority="high">
-  <link rel="stylesheet" href="styles.css?v=20261102b">
+  <link rel="stylesheet" href="styles.css?v=20261102c">
 
   <script type="application/ld+json">
   {
@@ -100,7 +100,8 @@
 
           <a class="btn btn-lg" href="#reservar" data-cta="hero">Ver disponibilidad</a>
           <p class="micro"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Completás tus datos y elegís entre horarios reales.</p>
-          <p class="micro ai-link" id="aiHeroLink" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3.5 13.8 9l5.7.2-4.5 3.5 1.6 5.5-4.6-3.2-4.6 3.2 1.6-5.5-4.5-3.5L10.2 9z"/></svg><span>¿No sabés qué necesita tu piel? <a href="#analisis">Analizala con IA</a></span></p>
+          <a class="btn btn-lg btn-ai" href="#analisis" id="aiHeroLink" data-cta="hero-ia" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3.5 13.8 9l5.7.2-4.5 3.5 1.6 5.5-4.6-3.2-4.6 3.2 1.6-5.5-4.5-3.5L10.2 9z"/></svg>Evaluá tu cara con IA</a>
+          <p class="micro ai-micro" id="aiHeroMicro" hidden>Gratis, en un minuto, desde tu celular. Las fotos no salen de tu teléfono.</p>
         </div>
 
         <figure class="hero-media" data-photo-slot="hero">
@@ -143,13 +144,13 @@
     <section class="section section-panel" id="analisis" aria-labelledby="ia-t" hidden>
       <div class="container ai-grid">
         <div class="ai-copy">
-          <p class="eyebrow">Orientación para tu piel</p>
-          <h2 id="ia-t">¿Qué podría necesitar tu piel?</h2>
-          <p>Orientación cosmética basada en tus respuestas y, cuando sea posible, en características visibles de tu foto. La profesional confirmará las necesidades de tu piel en consulta.</p>
+          <p class="eyebrow">Evaluación con IA</p>
+          <h2 id="ia-t">Evaluá tu cara con IA</h2>
+          <p>Te guiamos para sacar tres fotos (de frente y de cada lado), respondés 4 preguntas y te mostramos qué tipo de piel parece que tenés y qué identificamos en ella. La profesional lo confirma en la consulta.</p>
           <ul class="checks ai-tips">
-            <li>9 preguntas cortas, unos 2 minutos.</li>
-            <li>La foto es opcional: podés hacerlo sin foto.</li>
-            <li>Tu foto se analiza en tu teléfono: no se envía ni se guarda.</li>
+            <li>Un minuto, desde tu celular.</li>
+            <li>Las fotos se analizan en tu teléfono: no se envían ni se guardan.</li>
+            <li>Recibís tu resultado y lo podés mandar por WhatsApp.</li>
           </ul>
           <p class="ai-disclaimer">Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.</p>
         </div>
@@ -158,18 +159,58 @@
           <!-- 1. Introducción -->
           <div data-ai="intro">
             <p class="ai-step">Antes de empezar</p>
-            <p>Vas a recibir un tipo de piel orientativo, lo que podría aportarte una limpieza facial y cuidados básicos. No es un diagnóstico.</p>
+            <p>Vamos a usar la cámara de tu teléfono. Buscá un lugar con luz pareja de frente (por ejemplo, mirando a una ventana), sin maquillaje si podés, y sacate anteojos y flequillo de la cara.</p>
             <div class="field check">
               <input id="aiAdult" type="checkbox">
               <label for="aiAdult">Tengo 18 años o más.</label>
             </div>
-            <button type="button" class="btn btn-block" id="aiStart">Empezar</button>
+            <button type="button" class="btn btn-block" id="aiStart">Abrir la cámara</button>
+            <button type="button" class="link-btn" id="aiUploadStart">Prefiero subir una foto</button>
+            <button type="button" class="link-btn" id="aiNoPhoto">Hacerlo sin fotos</button>
             <p class="form-status" id="aiIntroStatus" role="status"></p>
           </div>
 
-          <!-- 2. Datos de contacto (la misma solicitud sirve para reservar) -->
+          <!-- 2. Cámara guiada -->
+          <div data-ai="camara" hidden>
+            <p class="ai-step" id="aiCamStep">Foto 1 de 3 · De frente</p>
+            <div class="ai-cam" id="aiCam">
+              <video id="aiVideo" playsinline muted autoplay></video>
+              <svg class="ai-cam-guide" viewBox="0 0 100 133" preserveAspectRatio="none" aria-hidden="true">
+                <defs><mask id="aiHole"><rect width="100" height="133" fill="#fff"/><ellipse cx="50" cy="60" rx="31" ry="41" fill="#000"/></mask></defs>
+                <rect width="100" height="133" fill="rgba(20,24,14,.55)" mask="url(#aiHole)"/>
+                <ellipse id="aiRing" cx="50" cy="60" rx="31" ry="41" fill="none" stroke="#fff" stroke-width="1.2" stroke-dasharray="3 2"/>
+              </svg>
+              <p class="ai-cam-msg" id="aiCamMsg">Preparando la cámara…</p>
+              <div class="ai-cam-flash" id="aiFlash"></div>
+            </div>
+            <div class="ai-thumbs" id="aiThumbs"></div>
+            <pre class="ai-diag" id="aiDiag" hidden></pre>
+            <div class="ai-cam-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="aiSkipSides" hidden>Seguir solo con la foto de frente</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="aiRetake" hidden>Repetir fotos</button>
+              <button type="button" class="btn btn-block" id="aiCamDone" hidden>Continuar</button>
+            </div>
+            <p class="form-status" id="aiCamStatus" role="status"></p>
+            <label class="link-btn" for="aiFile">Subir una foto en su lugar</label>
+            <input id="aiFile" type="file" accept="image/*" class="visually-hidden">
+          </div>
+
+          <!-- 3. Cuestionario (4 preguntas; 5 si no hay foto) -->
+          <div data-ai="quiz" hidden>
+            <p class="ai-step" id="aiQStep"></p>
+            <div class="ai-progress" aria-hidden="true"><span id="aiQBar"></span></div>
+            <fieldset class="ai-q" id="aiQ"></fieldset>
+            <div class="ai-qnav">
+              <button type="button" class="btn btn-ghost" id="aiQBack">Atrás</button>
+              <button type="button" class="btn" id="aiQNext">Siguiente</button>
+            </div>
+            <p class="form-status" id="aiQStatus" role="status"></p>
+          </div>
+
+          <!-- 4. Datos de contacto, antes de ver el resultado -->
           <form id="aiLead" data-ai="datos" novalidate hidden>
-            <p class="ai-step">Tus datos</p>
+            <p class="ai-step">Tu resultado está listo</p>
+            <p>Dejanos tus datos para verlo y guardarlo.</p>
             <div class="field-row">
               <div class="field">
                 <label for="a-firstName">Nombre</label>
@@ -201,47 +242,9 @@
               <label for="a-consent">Acepto que Clínica Centenario use estos datos para gestionar mi consulta y reserva. <a href="#privacidad">Aviso de privacidad</a></label>
               <p class="err" id="ea-consent" hidden>Necesitamos tu aceptación para continuar.</p>
             </div>
-            <button class="btn btn-block" type="submit" id="aiLeadBtn">Continuar</button>
+            <button class="btn btn-block" type="submit" id="aiLeadBtn">Ver mi resultado</button>
             <p class="form-status" id="aiLeadStatus" role="status"></p>
           </form>
-
-          <!-- 3. Cuestionario -->
-          <div data-ai="quiz" hidden>
-            <p class="ai-step" id="aiQStep"></p>
-            <div class="ai-progress" aria-hidden="true"><span id="aiQBar"></span></div>
-            <fieldset class="ai-q" id="aiQ"></fieldset>
-            <div class="ai-qnav">
-              <button type="button" class="btn btn-ghost" id="aiQBack">Atrás</button>
-              <button type="button" class="btn" id="aiQNext">Siguiente</button>
-            </div>
-            <p class="form-status" id="aiQStatus" role="status"></p>
-          </div>
-
-          <!-- 4. Foto opcional -->
-          <div data-ai="foto" hidden>
-            <p class="ai-step">Foto (opcional)</p>
-            <ul class="ai-photo-tips">
-              <li>Luz pareja, de frente (por ejemplo, mirando a una ventana).</li>
-              <li>Sin filtros ni modo belleza, y sin maquillaje si es posible.</li>
-              <li>Rostro despejado: sin anteojos, flequillo ni manos delante.</li>
-              <li>Cámara a la altura de los ojos, solo tu cara.</li>
-            </ul>
-            <div class="ai-pick" id="aiPickBtns">
-              <label class="btn" for="aiCam">Sacar foto</label>
-              <input id="aiCam" type="file" accept="image/*" capture="user" class="visually-hidden">
-              <label class="btn btn-ghost" for="aiFile">Subir una foto</label>
-              <input id="aiFile" type="file" accept="image/*" class="visually-hidden">
-            </div>
-            <div class="ai-preview" id="aiPreview" hidden>
-              <img id="aiPreviewImg" alt="Vista previa de tu foto">
-              <ul class="ai-checks" id="aiChecks" aria-live="polite"></ul>
-            </div>
-            <pre class="ai-diag" id="aiDiag" hidden></pre>
-            <button type="button" class="btn btn-block" id="aiSend" hidden>Ver mi orientación con la foto</button>
-            <p class="ai-note">Tu foto se analiza en tu teléfono: no se envía ni se guarda.</p>
-            <p class="form-status" id="aiStatus" role="status"></p>
-            <button type="button" class="link-btn" id="aiSkip">Seguir sin foto</button>
-          </div>
 
           <!-- 5. Resultado -->
           <div data-ai="resultado" id="aiResult" hidden tabindex="-1"></div>
@@ -544,8 +547,8 @@
     </div>
   </div>
 
-  <script src="config.js?v=20261102b"></script>
-  <script src="photos.js?v=20261102b"></script>
+  <script src="config.js?v=20261102c"></script>
+  <script src="photos.js?v=20261102c"></script>
   <script>
     /* Modo demo: solo en localhost, solo con ?demo=1 y solo si no hay API configurada. */
     (function () {
@@ -553,6 +556,6 @@
       window.__ccDemoReady = new Promise(function (ok) { var s = document.createElement('script'); s.src = 'demo-api.js'; s.onload = ok; document.head.appendChild(s); });
     })();
   </script>
-  <script src="app.js?v=20261102b" defer></script>
+  <script src="app.js?v=20261102c" defer></script>
 </body>
 </html>
