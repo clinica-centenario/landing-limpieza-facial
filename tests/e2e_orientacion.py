@@ -33,7 +33,7 @@ errors, calls = [], []
 with sync_playwright() as p:
     b = p.chromium.launch(channel="chrome")
     pg = b.new_page(viewport={"width": 390, "height": 844}, locale="es-UY")
-    pg.route("**/config.js", lambda r: r.fulfill(status=200, content_type="text/javascript", body=cfgjs))
+    pg.route("**/config.js*", lambda r: r.fulfill(status=200, content_type="text/javascript", body=cfgjs))
     pg.route("https://script.google.com/**", lambda r: r.abort())
     pg.on("pageerror", lambda e: errors.append(str(e)))
     pg.goto(base + "?demo=1&diagnostico=1")

@@ -95,7 +95,7 @@ with sync_playwright() as p:
     br = p.chromium.launch(**({"executable_path": os.environ["CHROME_PATH"]} if os.environ.get("CHROME_PATH") else {"channel": "chrome"}))
     ctx = br.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale="es-UY", timezone_id="Europe/Madrid")
     # Zona horaria del navegador distinta a propósito: la agenda tiene que mostrar hora de Montevideo igual.
-    ctx.route("**/config.js", lambda r: r.fulfill(status=200, content_type="text/javascript",
+    ctx.route("**/config.js*", lambda r: r.fulfill(status=200, content_type="text/javascript",
         body=re.sub(r"API_URL: '[^']*'", f"API_URL: '{API}'", open(os.path.join(PUBLIC, "config.js")).read()).replace("META_PIXEL_ID: ''", "META_PIXEL_ID: '000000000000000'")))
     # Nunca llegar al backend real, aunque config.js apunte a producción.
     ctx.route("https://script.google.com/**", lambda r: r.abort())
