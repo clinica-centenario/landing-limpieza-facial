@@ -1,10 +1,40 @@
 /**
- * Tareas de puesta en marcha. Ejecutar desde el editor de Apps Script,
- * con la cuenta ccentenario3090@gmail.com, en este orden:
- *   1. setupSecrets()   → genera LEAD_SECRET (una sola vez)
- *   2. setupSheet()     → crea la planilla y guarda SHEET_ID
- *   3. checkCalendars() → verifica acceso a los calendarios configurados
+ * Tareas de puesta en marcha. Ejecutar desde el editor de Apps Script vinculado a la
+ * planilla "Datos Landing", con la cuenta ccentenario3090@gmail.com:
+ *   configurarTodo()  → corre los pasos de abajo en orden.
+ *   1. setupSecrets()       → genera LEAD_SECRET (una sola vez)
+ *   2. setupSheet()         → guarda SHEET_ID y completa pestañas faltantes
+ *   3. setupRoomCalendar()  → busca el calendario del consultorio por nombre y guarda su ID
+ *   4. checkCalendars()     → verifica acceso a los calendarios configurados
+ * Los IDs quedan en Propiedades del script, nunca en el código (el repositorio es público).
  */
+function configurarTodo() {
+  setupSecrets();
+  setupSheet();
+  setupRoomCalendar();
+  checkCalendars();
+}
+
+/** Busca en la cuenta los calendarios cuyo nombre coincide con ROOM_LABELS y guarda sus IDs. */
+function setupRoomCalendar() {
+  var cfg = getConfig();
+  var wanted = cfg.ROOM_LABEL_LIST.map(normalizeWord_);
+  if (!wanted.length) throw new Error('Completá ROOM_LABELS con el nombre del calendario del consultorio.');
+  var found = {}, pageToken;
+  do {
+    var res = Calendar.CalendarList.list({ pageToken: pageToken, maxResults: 250 });
+    (res.items || []).forEach(function (c) {
+      var i = wanted.indexOf(normalizeWord_(c.summaryOverride || c.summary));
+      if (i >= 0 && !found[i]) found[i] = c.id;
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  var missing = cfg.ROOM_LABEL_LIST.filter(function (n, i) { return !found[i]; });
+  if (missing.length) throw new Error('No encontré estos calendarios en la cuenta: ' + missing.join(', '));
+  var ids = cfg.ROOM_LABEL_LIST.map(function (n, i) { return found[i]; });
+  PropertiesService.getScriptProperties().setProperty('ROOM_CALENDAR_IDS', ids.join(','));
+  Logger.log('Consultorio configurado: ' + cfg.ROOM_LABELS);
+}
 function setupSecrets() {
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('LEAD_SECRET')) {
@@ -37,7 +67,7 @@ function cleanupTestEvents(daysAhead) {
   var cfg = getConfig();
   if (cfg.ENV === 'production') throw new Error('Solo en development');
   var now = new Date(), until = new Date(now.getTime() + (daysAhead || 60) * 86400000);
-  [cfg.PRO_CALENDAR_ID].concat(cfg.ROOM_CALENDAR_LIST).forEach(function (cal) {
+  calendarIds_(cfg).forEach(function (cal) {
     var res = Calendar.Events.list(cal, { timeMin: now.toISOString(), timeMax: until.toISOString(), singleEvents: true,
       privateExtendedProperty: 'source=' + EVENT_SOURCE_TAG, maxResults: 250 });
     (res.items || []).forEach(function (e) {

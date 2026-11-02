@@ -23,25 +23,25 @@ def serve():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
-def next_monday():
-    d = datetime.now(UY).date()
-    return d + timedelta(days=(7 - d.weekday()) or 7)
 
 calls = []
 state = {"lead_fail_once": True, "book_conflict_once": True}
 
-def slots_for(frm, days):
-    out = []
-    d0 = datetime.strptime(frm, "%Y-%m-%d").date()
-    now = datetime.now(UY)
-    for i in range(days):
-        d = d0 + timedelta(days=i)
-        if d.weekday() >= 5: continue
-        for t in range(9 * 60, 20 * 60 + 1, 30):
-            st = datetime(d.year, d.month, d.day, t // 60, t % 60, tzinfo=UY)
-            if st <= now or t in (600, 630): continue  # 10:00 y 10:30 ocupados
-            out.append({"start": st.astimezone(timezone.utc).isoformat().replace("+00:00", ".000Z"), "date": d.isoformat(), "time": f"{t//60:02d}:{t%60:02d}"})
-    return out
+def recommend(exclude=None, count=3):
+    """Igual que el servidor: los horarios libres más próximos, sin superponerse (lun a vie 9–21, 10:00 y 10:30 ocupados)."""
+    out, now = [], datetime.now(UY)
+    d = now.date()
+    while len(out) < count:
+        if d.weekday() < 5:
+            for t in range(9 * 60, 20 * 60 + 1, 30):
+                st = datetime(d.year, d.month, d.day, t // 60, t % 60, tzinfo=UY)
+                iso = st.astimezone(timezone.utc).isoformat().replace("+00:00", ".000Z")
+                if st <= now or t in (600, 630) or iso == exclude: continue
+                if out and st < out[-1]["_end"]: continue
+                out.append({"start": iso, "date": d.isoformat(), "time": f"{t//60:02d}:{t%60:02d}", "soon": st <= now + timedelta(hours=24), "_end": st + timedelta(hours=1)})
+                if len(out) == count: break
+        d += timedelta(days=1)
+    return [{k: v for k, v in s.items() if k != "_end"} for s in out]
 
 def api_handler(route, request):
     body = json.loads(request.post_data or "{}")
@@ -53,14 +53,13 @@ def api_handler(route, request):
             return route.abort("failed")  # fallo de red: el front debe conservar los datos
         res = {"ok": True, "requestId": "CC-261015-ABC123", "token": "t" * 40, "leadEventId": "lead_CC-261015-ABC123"}
     elif a == "availability":
-        res = {"ok": True, "from": body["from"], "days": body["days"], "timezone": "America/Montevideo",
-               "slots": slots_for(body["from"], body["days"]), "horizonEnd": (datetime.now(UY).date() + timedelta(days=60)).isoformat()}
+        res = {"ok": True, "timezone": "America/Montevideo", "slots": recommend(), "withinHours": 24, "durationMin": 60, "whatsapp": "59899123456"}
     elif a == "track":
         res = {"ok": True}
     elif a == "book":
         if state["book_conflict_once"]:
             state["book_conflict_once"] = False
-            alts = [s for s in slots_for(next_monday().isoformat(), 1) if s["start"] != body["start"]][:4]
+            alts = recommend(exclude=body["start"])
             res = {"ok": False, "code": "slot_unavailable", "alternatives": alts}
         else:
             st = datetime.fromisoformat(body["start"].replace("Z", "+00:00"))
@@ -87,7 +86,8 @@ def names(page): return [c["name"] for c in fbq(page)]
 srv = serve()
 base = f"http://127.0.0.1:{srv.server_address[1]}"
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+    # CHROME_PATH apunta a un Chromium propio; si no, se usa el Google Chrome instalado.
+    br = p.chromium.launch(**({"executable_path": os.environ["CHROME_PATH"]} if os.environ.get("CHROME_PATH") else {"channel": "chrome"}))
     ctx = br.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale="es-UY", timezone_id="Europe/Madrid")
     # Zona horaria del navegador distinta a propósito: la agenda tiene que mostrar hora de Montevideo igual.
     ctx.route("**/config.js", lambda r: r.fulfill(status=200, content_type="text/javascript",
@@ -115,16 +115,17 @@ with sync_playwright() as p:
     check("CTA no dispara Lead/formulario_abierto", names(page) == ["PageView"], names(page))
     page.screenshot(path=f"{OUT}/02-form-mobile.png")
 
-    page.focus("#f-name")
+    page.focus("#f-firstName")
     check("formulario_abierto al interactuar", names(page).count("formulario_abierto") == 1, names(page))
 
     # Envío inválido
     page.click("#leadBtn")
     check("inválido: no llama a la API", not any(c.get("action") == "lead" for c in calls))
-    check("inválido: muestra errores", page.is_visible("#e-name") and page.is_visible("#e-phone") and page.is_visible("#e-consent"))
+    check("inválido: muestra errores", all(page.is_visible(f"#e-{f}") for f in ["firstName", "lastName", "phone", "consent"]))
     page.screenshot(path=f"{OUT}/03-form-errores.png")
 
-    page.fill("#f-name", "Ana Pérez")
+    page.fill("#f-firstName", "Ana")
+    page.fill("#f-lastName", "Pérez")
     page.fill("#f-phone", "099 123 456")
     page.fill("#f-email", "ana@example.com")
     page.check("#f-consent")
@@ -139,8 +140,9 @@ with sync_playwright() as p:
     page.screenshot(path=f"{OUT}/04-error-red.png")
     page.click("#leadBtn")
     page.wait_for_selector("[data-panel='2']:not([hidden])")
-    page.wait_for_selector(".slot")
+    page.wait_for_selector(".rec")
     lead_calls = [c for c in calls if c.get("action") == "lead"]
+    check("nombre y apellido por separado", lead_calls[-1].get("firstName") == "Ana" and lead_calls[-1].get("lastName") == "Pérez")
     check("reintento usa la misma clave de envío", lead_calls[0]["submitKey"] == lead_calls[1]["submitKey"])
     check("UTM enviados", lead_calls[-1]["utm"].get("utm_source") == "instagram")
     lead_ev = [c for c in fbq(page) if c["name"] == "Lead"]
@@ -148,33 +150,35 @@ with sync_playwright() as p:
     check("agenda solo después de guardar", calls.index(lead_calls[-1]) < [i for i, c in enumerate(calls) if c.get("action") == "availability"][0])
     check("vio_horarios una vez", names(page).count("vio_horarios") == 1)
 
-    # Zona horaria: primer horario 09:00 aunque el navegador esté en Madrid
-    first_times = page.eval_on_selector_all(".slot", "els => els.map(e => e.textContent)")
-    now_uy = datetime.now(UY).strftime("%H:%M")
-    check("hoy solo muestra horarios futuros (hora UY)", first_times and first_times[0] > now_uy, (first_times[:2], now_uy))
+    # Tres horarios recomendados, en hora de Montevideo aunque el navegador esté en Madrid
+    expected = recommend()
+    shown = page.eval_on_selector_all(".rec .rt", "els => els.map(e => e.textContent)")
+    check("muestra 3 horarios recomendados", len(shown) == 3, shown)
+    check("horarios en hora UY con navegador en Madrid", all(sh.startswith(ex["time"]) for sh, ex in zip(shown, expected)), (shown, [e["time"] for e in expected]))
+    check("marca los de las próximas 24 h", page.locator(".rec .rb").count() == sum(1 for e in expected if e["soon"]))
+    wa = page.get_attribute("#waLink", "href") or ""
+    check("WhatsApp si ninguno sirve", page.is_visible("#waHelp") and wa.startswith("https://wa.me/59899123456?text=") and "CC-261015-ABC123" in wa, wa)
     check("agenda sin scroll horizontal", page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
     page.locator("#booking").scroll_into_view_if_needed()
     page.screenshot(path=f"{OUT}/05-agenda-mobile.png")
 
-    # Ir a una semana con lunes conocido y elegir 11:00
-    while page.inner_text("#weekLabel").find(str(next_monday().day)) < 0 and not page.is_disabled("#nextWeek"):
-        page.click("#nextWeek"); page.wait_for_selector(".slot, .slot-state:not(:empty)")
-    page.click(f".day[data-ymd='{next_monday().isoformat()}']")
-    page.click(".slot >> text=11:00")
+    page.click(".rec >> nth=1")
+    pick = expected[1]
     check("eligio_horario al elegir", names(page).count("eligio_horario") == 1)
-    check("lunes arranca 09:00 (hora UY con navegador en Madrid)", page.eval_on_selector_all(".slot", "e=>e[0].textContent") == "09:00")
-    check("fin calculado en hora UY", "11:00 a 12:00" in page.inner_text("#confirmWhen"), page.inner_text("#confirmWhen"))
+    end = (datetime.strptime(pick["time"], "%H:%M") + timedelta(hours=1)).strftime("%H:%M")
+    check("fin calculado en hora UY", f"{pick['time']} a {end}" in page.inner_text("#confirmWhen"), page.inner_text("#confirmWhen"))
     check("elegir no dispara Schedule", "Schedule" not in names(page))
     page.screenshot(path=f"{OUT}/06-confirmar.png")
 
     page.dblclick("#bookBtn")
-    page.wait_for_selector("#slotState .slots .slot")
+    page.wait_for_function("document.querySelector('#slotState').textContent.includes('ocupar')")
+    check("conflicto: nuevas recomendaciones sin el horario perdido", pick["start"] not in page.eval_on_selector_all(".rec", "e => e.map(x => x.dataset.start)"))
     book_calls = [c for c in calls if c.get("action") == "book"]
     check("confirmar doble clic: una sola solicitud", len(book_calls) == 1, len(book_calls))
     check("conflicto: sin Schedule", "Schedule" not in names(page))
     page.screenshot(path=f"{OUT}/07-conflicto-alternativas.png")
 
-    page.click("#slotState .slots .slot >> nth=0")
+    page.click(".rec >> nth=0")
     page.click("#bookBtn")
     page.wait_for_selector("[data-panel='3']:not([hidden])")
     sched = [c for c in fbq(page) if c["name"] == "Schedule"]

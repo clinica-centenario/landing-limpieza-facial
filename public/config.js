@@ -4,7 +4,7 @@
  */
 window.CC_CONFIG = {
   // URL del Web App de Apps Script (termina en /exec). PENDIENTE hasta desplegar.
-  API_URL: '',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxlh5PM1CsiiJTqRtnHeavdbR4OVQD15jpBzJOXVcssrgz1IJikm6WcfZ3ZqFeMnPWLRA/exec',
 
   // Meta Pixel. PENDIENTE. Vacío = no se carga el píxel.
   META_PIXEL_ID: '',
@@ -18,9 +18,12 @@ window.CC_CONFIG = {
   // URL canónica final de la landing. PENDIENTE (ruta definitiva).
   CANONICAL_URL: 'https://clinicacentenario.com.uy/limpieza-facial',
 
+  // WhatsApp de respaldo si la planilla no tiene uno cargado (con código de país, sin +). PENDIENTE.
+  // El número que manda es el de la pestaña Configuración de "Datos Landing".
+  WHATSAPP_NUMBER: '',
+
   CONSENT_VERSION: 'v1-2026-10',
   TIMEZONE: 'America/Montevideo',
-  DAYS_PER_WEEK_VIEW: 5,
 
   PRICES: { list: 2280, prepaid: 1824, discountPct: 20, saving: 456 },
 
@@ -41,8 +44,8 @@ window.CC_CONFIG = {
   PRIVACY_CONTACT: '',
 
   // Análisis de piel con IA. Requiere AI_ENABLED y ANTHROPIC_API_KEY en el script.
-  // false = la sección no se muestra.
-  AI_ANALYSIS_ENABLED: true,
+  // false = la sección no se muestra. Apagado hasta la etapa del análisis (guardará en la pestaña "Análisis de piel").
+  AI_ANALYSIS_ENABLED: false,
 
   // Reseñas reales. Vacío = el bloque NO se muestra. Formato: { text, author, date }
   // No cargar reseñas inventadas, editadas sin permiso ni puntajes que no existan.

@@ -6,8 +6,12 @@
  * Propiedades del script (Configuración del proyecto → Propiedades del script).
  * Una propiedad del script con el mismo nombre SIEMPRE gana sobre este archivo.
  *
- * Secretos (LEAD_SECRET, META_CAPI_TOKEN, TURNSTILE_SECRET) van SOLO en
- * Propiedades del script. Nunca en este archivo ni en la planilla.
+ * Secretos (LEAD_SECRET, META_CAPI_TOKEN, TURNSTILE_SECRET) e IDs privados
+ * (SHEET_ID, calendarios) van SOLO en Propiedades del script: este repositorio es público.
+ *
+ * Los días y horarios de atención, las fechas cerradas y los parámetros de agenda
+ * se editan en la planilla "Datos Landing" (pestañas Horarios, Días cerrados y
+ * Configuración). Lo que esté cargado en la planilla gana sobre este archivo.
  *
  * Todo lo marcado PENDIENTE no está definido todavía: no inventar valores.
  */
@@ -16,24 +20,23 @@ var DEFAULT_CONFIG = {
   ENV: 'development', // 'development' | 'production'. En development las filas llevan prefijo [TEST].
 
   // ── Calendarios ───────────────────────────────────────────
-  PRO_CALENDAR_ID: '',            // PENDIENTE: calendario de la Lic. Jaqueline Mansilla (compartido con permiso de edición)
-  ROOM_CALENDAR_IDS: '',          // PENDIENTE: IDs de consultorios habilitados, separados por coma, en orden de preferencia
-  ROOM_LABELS: '',                // Opcional: nombres internos en el mismo orden (p.ej. "Consultorio 5,Con 3 - Camilla 1")
+  PRO_CALENDAR_ID: '',            // Opcional: calendario de la profesional. Vacío = no se cruza ni se escribe en él.
+  ROOM_CALENDAR_IDS: '',          // Lo completa setupRoomCalendar() en Propiedades del script (no pegar acá)
+  ROOM_LABELS: 'Con 3 - Camilla 1', // Nombre del calendario del consultorio en la cuenta (se usa para encontrarlo)
   TIMEZONE: 'America/Montevideo',
 
-  // ── Agenda ────────────────────────────────────────────────
-  WORKING_DAYS: '1,2,3,4,5',      // 1 = lunes … 7 = domingo
-  OPEN_TIME: '09:00',
-  CLOSE_TIME: '21:00',
-  LAST_START_TIME: '20:00',
+  // ── Agenda (valores por defecto; la planilla los sobrescribe) ──
+  // Días y franjas horarias: pestaña "Horarios". Fechas cerradas: pestaña "Días cerrados".
   DURATION_MIN: 60,
   SLOT_STEP_MIN: 30,              // cada cuánto puede empezar una sesión
   BUFFER_BEFORE_MIN: 0,           // margen libre antes de la sesión
   BUFFER_AFTER_MIN: 0,            // margen libre después de la sesión
   MIN_NOTICE_HOURS: 0,            // PENDIENTE (regla de anticipación). 0 = solo excluye horarios ya pasados.
   HORIZON_DAYS: 60,               // hasta cuántos días hacia adelante se puede reservar
-  CLOSED_DATES: '',               // fechas cerradas YYYY-MM-DD separadas por coma (feriados, licencias)
   MAX_DAYS_PER_QUERY: 7,
+  RECOMMEND_WITHIN_HOURS: 24,     // se priorizan horarios dentro de esta ventana
+  RECOMMEND_COUNT: 3,             // cuántos horarios se le ofrecen a la persona
+  WHATSAPP_NUMBER: '',            // contacto si ningún horario le sirve (con código de país, sin +)
 
   // ── Servicio y precios ────────────────────────────────────
   SERVICE_NAME: 'Limpieza facial profunda personalizada',
@@ -49,7 +52,7 @@ var DEFAULT_CONFIG = {
   PRO_EVENT_INCLUDES_CONTACT: true,
 
   // ── Planilla ──────────────────────────────────────────────
-  SHEET_ID: '',                   // Se completa solo al correr setupSheet(), o pegá el ID de una planilla existente
+  SHEET_ID: '',                   // Lo completa setupSheet() en Propiedades del script (no pegar acá)
 
   // ── Antiabuso ─────────────────────────────────────────────
   MIN_FILL_MS: 2500,              // envíos más rápidos que esto se tratan como bot
@@ -72,22 +75,36 @@ var DEFAULT_CONFIG = {
   CAPI_TEST_EVENT_CODE: ''
 };
 
-/** Lee la configuración efectiva: Propiedades del script > DEFAULT_CONFIG. */
+/** Parámetros que el equipo puede cambiar desde la pestaña Configuración. */
+var SHEET_KEYS_ = ['DURATION_MIN', 'SLOT_STEP_MIN', 'MIN_NOTICE_HOURS', 'HORIZON_DAYS', 'RECOMMEND_WITHIN_HOURS',
+                   'RECOMMEND_COUNT', 'BUFFER_BEFORE_MIN', 'BUFFER_AFTER_MIN', 'WHATSAPP_NUMBER'];
+
+/**
+ * Configuración efectiva: planilla (solo SHEET_KEYS_) > Propiedades del script > DEFAULT_CONFIG.
+ * cfg.WEEKLY = { 1..7: [{from, to}] } en minutos; vacío si la planilla no se puede leer (falla cerrada).
+ */
 function getConfig() {
   var props = {};
   try { props = PropertiesService.getScriptProperties().getProperties() || {}; } catch (e) { props = {}; }
+  var tz = props.TIMEZONE || DEFAULT_CONFIG.TIMEZONE;
+  var sheet = readSheetSettings_(props.SHEET_ID || DEFAULT_CONFIG.SHEET_ID, tz);
   var cfg = {};
   Object.keys(DEFAULT_CONFIG).forEach(function (k) {
     var def = DEFAULT_CONFIG[k];
     var raw = Object.prototype.hasOwnProperty.call(props, k) ? props[k] : def;
+    if (SHEET_KEYS_.indexOf(k) >= 0 && sheet.params[k] !== undefined && sheet.params[k] !== '') raw = sheet.params[k];
     if (typeof def === 'number') cfg[k] = Number(raw);
     else if (typeof def === 'boolean') cfg[k] = (raw === true || raw === 'true');
     else cfg[k] = String(raw == null ? '' : raw);
   });
   cfg.ROOM_CALENDAR_LIST = splitList_(cfg.ROOM_CALENDAR_IDS);
   cfg.ROOM_LABEL_LIST = splitList_(cfg.ROOM_LABELS);
-  cfg.WORKING_DAY_LIST = splitList_(cfg.WORKING_DAYS).map(Number);
-  cfg.CLOSED_DATE_LIST = splitList_(cfg.CLOSED_DATES);
+  if (!(cfg.DURATION_MIN > 0)) cfg.DURATION_MIN = DEFAULT_CONFIG.DURATION_MIN;
+  if (!(cfg.SLOT_STEP_MIN > 0)) cfg.SLOT_STEP_MIN = DEFAULT_CONFIG.SLOT_STEP_MIN;
+  if (!(cfg.RECOMMEND_COUNT > 0)) cfg.RECOMMEND_COUNT = DEFAULT_CONFIG.RECOMMEND_COUNT;
+  cfg.WHATSAPP_NUMBER = cfg.WHATSAPP_NUMBER.replace(/\D/g, '');
+  cfg.WEEKLY = sheet.weekly;
+  cfg.CLOSED_DATE_LIST = sheet.closed;
   return cfg;
 }
 
@@ -98,8 +115,7 @@ function splitList_(s) {
 /** Qué falta para que la reserva funcione de verdad. */
 function missingConfig_(cfg) {
   var missing = [];
-  if (!cfg.PRO_CALENDAR_ID) missing.push('PRO_CALENDAR_ID');
-  if (!cfg.ROOM_CALENDAR_LIST.length) missing.push('ROOM_CALENDAR_IDS');
+  if (!cfg.ROOM_CALENDAR_LIST.length) missing.push('ROOM_CALENDAR_IDS (correr setupRoomCalendar)');
   if (!cfg.SHEET_ID) missing.push('SHEET_ID');
   if (!getSecret_('LEAD_SECRET')) missing.push('LEAD_SECRET (correr setupSecrets)');
   return missing;

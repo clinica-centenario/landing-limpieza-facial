@@ -14,12 +14,11 @@ function cleanText_(s, max) {
   return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, max || 200);
 }
 
-/** Nombre y apellido: letras, espacios, apóstrofes y guiones; al menos 2 palabras. */
-function validateName_(raw) {
-  var s = cleanText_(raw, 80);
-  if (s.length < 4) return null;
+/** Nombre o apellido por separado: letras, espacios, apóstrofes y guiones; al menos 2 letras. */
+function validatePersonName_(raw) {
+  var s = cleanText_(raw, 60);
   if (!/^[A-Za-zÀ-ÖØ-öø-ÿÑñ' .\-]+$/.test(s)) return null;
-  if (s.split(' ').filter(function (w) { return w.replace(/[.'\-]/g, '').length > 0; }).length < 2) return null;
+  if (s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÑñ]/g, '').length < 2) return null;
   return s;
 }
 

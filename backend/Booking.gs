@@ -1,6 +1,6 @@
 /**
  * Confirmación de reserva con:
- *  - revalidación de profesional + consultorio en el servidor,
+ *  - revalidación del consultorio (y de la profesional, si su calendario está configurado) en el servidor,
  *  - lock del script (serializa confirmaciones que entran por esta landing),
  *  - idempotencia (IDs de evento deterministas por intento),
  *  - verificación posterior a la escritura (detecta escrituras externas en la ventana),
@@ -27,6 +27,7 @@ function bookSlot_(cfg, body, now) {
   var evP = calendarEventId_(bookingId, 'p');
   var evR = calendarEventId_(bookingId, 'r');
 
+  var pro = cfg.PRO_CALENDAR_ID; // opcional: sin calendario de la profesional solo se agenda el consultorio
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(25000)) return fail_('busy_retry');
   try {
@@ -40,20 +41,19 @@ function bookSlot_(cfg, body, now) {
     }
 
     // Restos de un intento anterior idéntico (p.ej. timeout después de crear eventos)
-    var existingP = getEventSafe_(cfg.PRO_CALENDAR_ID, evP);
+    var existingP = pro ? getEventSafe_(pro, evP) : null;
     var existingRoom = null;
     cfg.ROOM_CALENDAR_LIST.some(function (r) { var e = getEventSafe_(r, evR); if (e) { existingRoom = { cal: r, ev: e }; return true; } return false; });
-    if (existingP && existingRoom) {
-      return ok_(finalize_(cfg, requestId, bookingId, slot, existingRoom.cal, evP, evR, true));
+    if (existingRoom && (existingP || !pro)) {
+      return ok_(finalize_(cfg, requestId, bookingId, slot, existingRoom.cal, pro ? evP : '', evR, true));
     }
-    if (existingP) deleteEventSafe_(cfg.PRO_CALENDAR_ID, evP);
+    if (existingP) deleteEventSafe_(pro, evP);
     if (existingRoom) deleteEventSafe_(existingRoom.cal, evR);
 
     // 1) Revalidación
     var before = cfg.BUFFER_BEFORE_MIN * 60000, after = cfg.BUFFER_AFTER_MIN * 60000;
     var ws = new Date(slot.start.getTime() - before), we = new Date(slot.end.getTime() + after);
-    var ids = [cfg.PRO_CALENDAR_ID].concat(cfg.ROOM_CALENDAR_LIST);
-    var busy = fetchBusy_(ids, ws, we, cfg.TIMEZONE);
+    var busy = fetchBusy_(calendarIds_(cfg), ws, we, cfg.TIMEZONE);
     var avail = crossAvailability_(cfg, [slot], busy);
     if (!avail.length) {
       logEvent_(cfg, requestId, 'horario_ocupado_al_confirmar', { start: slot.start.toISOString() });
@@ -61,32 +61,35 @@ function bookSlot_(cfg, body, now) {
     }
     var room = avail[0].rooms[0];
 
-    // 2) Escritura: profesional primero, después consultorio
-    var proEvent = buildProEvent_(cfg, contact, requestId, bookingId, slot, room, evP);
-    var roomEvent = buildRoomEvent_(cfg, requestId, bookingId, slot, room, evR);
-    try {
-      insertEvent_(cfg.PRO_CALENDAR_ID, proEvent);
-    } catch (e) {
-      logEvent_(cfg, requestId, 'error_evento_profesional', { msg: shortErr_(e) });
-      return fail_('calendar_error');
+    // 2) Escritura: profesional primero (si corresponde), después consultorio
+    var created = [];
+    if (pro) {
+      try {
+        insertEvent_(pro, buildProEvent_(cfg, contact, requestId, bookingId, slot, room, evP));
+        created.push([pro, evP]);
+      } catch (e) {
+        logEvent_(cfg, requestId, 'error_evento_profesional', { msg: shortErr_(e) });
+        return fail_('calendar_error');
+      }
     }
     try {
-      insertEvent_(room, roomEvent);
+      insertEvent_(room, buildRoomEvent_(cfg, requestId, bookingId, slot, room, evR));
     } catch (e) {
       logEvent_(cfg, requestId, 'error_evento_consultorio', { msg: shortErr_(e) });
-      return rollback_(cfg, requestId, bookingId, [[cfg.PRO_CALENDAR_ID, evP]], 'calendar_error');
+      return created.length ? rollback_(cfg, requestId, bookingId, created, 'calendar_error') : fail_('calendar_error');
     }
+    created.push([room, evR]);
 
     // 3) Verificación posterior: ¿alguien más escribió en la ventana mientras tanto?
-    var clash = externalOverlap_(cfg.PRO_CALENDAR_ID, ws, we, [evP]) || externalOverlap_(room, ws, we, [evR]);
+    var clash = (pro && externalOverlap_(pro, ws, we, [evP])) || externalOverlap_(room, ws, we, [evR]);
     if (clash) {
       logEvent_(cfg, requestId, 'conflicto_detectado_post_escritura', { start: slot.start.toISOString() });
-      var rb = rollback_(cfg, requestId, bookingId, [[cfg.PRO_CALENDAR_ID, evP], [room, evR]], 'slot_unavailable');
+      var rb = rollback_(cfg, requestId, bookingId, created, 'slot_unavailable');
       if (rb.ok === false && rb.code === 'slot_unavailable') rb.alternatives = alternatives_(cfg, start, now);
       return rb;
     }
 
-    return ok_(finalize_(cfg, requestId, bookingId, slot, room, evP, evR, false));
+    return ok_(finalize_(cfg, requestId, bookingId, slot, room, pro ? evP : '', evR, false));
   } finally {
     lock.releaseLock();
   }
@@ -165,7 +168,8 @@ function rollback_(cfg, requestId, bookingId, created, codeIfClean) {
 }
 
 function buildProEvent_(cfg, contact, requestId, bookingId, slot, room, id) {
-  var name = String(contact['Nombre y apellido']).replace(/^'/, '').replace(/^\[TEST\] /, '');
+  var name = [contact['Nombre'], contact['Apellido']].map(function (v) { return String(v || '').replace(/^'/, ''); })
+    .join(' ').replace(/^\[TEST\] /, '').trim();
   var test = cfg.ENV === 'production' ? '' : '[TEST] ';
   var desc = [
     'Servicio: ' + cfg.SERVICE_NAME + ' (' + cfg.DURATION_MIN + ' min)',
@@ -252,15 +256,14 @@ function externalOverlap_(calId, ws, we, ownIds) {
   });
 }
 
+/** Nuevas recomendaciones cuando el horario elegido se ocupó (sin repetir ese horario). */
 function alternatives_(cfg, start, now) {
   try {
-    var lp = localParts_(start, cfg.TIMEZONE);
-    var res = computeAvailability_(cfg, { y: lp.y, m: lp.m, d: lp.d }, cfg.MAX_DAYS_PER_QUERY, now);
-    return res.slots.slice(0, 6).map(publicSlot_);
+    return recommendSlots_(cfg, now, start.toISOString()).slots.map(publicSlot_);
   } catch (e) { return []; }
 }
 
-function publicSlot_(s) { return { start: s.start.toISOString(), date: s.date, time: s.time }; }
+function publicSlot_(s) { return { start: s.start.toISOString(), date: s.date, time: s.time, soon: !!s.soon }; }
 
 function shortErr_(e) { return String(e && e.message || e).slice(0, 160); }
 function ok_(data) { data.ok = true; return data; }

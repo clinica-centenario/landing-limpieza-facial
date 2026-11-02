@@ -88,6 +88,7 @@ function makeSheets(state) {
         }
         const chain = {
           getValues: () => { const out = []; for (let i = 0; i < (nr || 1); i++) { const r = rows[a - 1 + i] || []; out.push(Array.from({ length: nc || 1 }, (_, j) => r[b - 1 + j] ?? '')); } return out; },
+          getDisplayValues: () => chain.getValues().map(r => r.map(v => String(v))),
           setValues: (vals) => {
             if (state.failSheetWrite && a > 1) throw new Error('Service Spreadsheets failed');
             vals.forEach((r, i) => { rows[a - 1 + i] = rows[a - 1 + i] || []; r.forEach((v, j) => rows[a - 1 + i][b - 1 + j] = (typeof v === 'string' && v.startsWith("'")) ? v.slice(1) : v); });
@@ -108,7 +109,7 @@ function makeSheets(state) {
     insertSheet: (n) => { state.sheets[n] = []; return sheetObj(n); },
     getSheets: () => Object.keys(state.sheets).map(sheetObj), deleteSheet() {}
   };
-  return { openById: () => ss, create: () => ss, flush() {} };
+  return { openById: () => { if (state.failSheetRead) throw new Error('Service Spreadsheets failed'); return ss; }, getActiveSpreadsheet: () => ss, flush() {} };
 }
 
 function createEnv(opts = {}) {
@@ -124,7 +125,7 @@ function createEnv(opts = {}) {
     SpreadsheetApp: makeSheets(state),
     PropertiesService: { getScriptProperties: () => ({
       getProperties: () => ({ ...state.props }), getProperty: k => state.props[k] ?? null, setProperty: (k, v) => { state.props[k] = v; } }) },
-    CacheService: { getScriptCache: () => ({ get: k => state.cache[k] ?? null, put: (k, v) => { state.cache[k] = v; } }) },
+    CacheService: { getScriptCache: () => ({ get: k => state.cache[k] ?? null, put: (k, v) => { state.cache[k] = v; }, remove: k => { delete state.cache[k]; } }) },
     LockService: { getScriptLock: () => ({
       tryLock: () => { if (state.locked) return false; state.locked = true; return true; },
       waitLock: () => { if (state.locked) throw new Error('Lock timeout'); state.locked = true; },
@@ -149,9 +150,24 @@ function createEnv(opts = {}) {
     PRO_CALENDAR_ID: 'pro@cal', ROOM_CALENDAR_IDS: 'roomA@cal,roomB@cal', ROOM_LABELS: 'Consultorio A,Consultorio B',
     ...(opts.props || {})
   });
+  if (opts.now) ctx.now_ = () => new Date(opts.now);
   vm.runInContext('setupSheet()', ctx);
+  // Pestaña Horarios: por defecto lunes a viernes de 9 a 21 (cada test puede cambiarla con setHours).
+  const setHours = (rows) => {
+    state.sheets['Horarios'].splice(1, Infinity, ...rows.map(r => [r[0], r[1], r[2], r[3] ?? 'Sí', '']));
+    delete state.cache.sheet_settings_v1;
+  };
+  const setParam = (key, value) => {
+    const r = state.sheets['Configuración'].find(x => x[3] === key); r[1] = String(value);
+    delete state.cache.sheet_settings_v1;
+  };
+  const setClosed = (dates) => {
+    state.sheets['Días cerrados'].splice(1, Infinity, ...dates.map(d => [d, '']));
+    delete state.cache.sheet_settings_v1;
+  };
+  setHours(opts.hours || ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'].map(d => [d, '09:00', '21:00']));
   const post = (body) => ctx.doPost({ postData: { contents: JSON.stringify(body) } }).body;
-  return { ctx, state, post };
+  return { ctx, state, post, setHours, setParam, setClosed };
 }
 
 module.exports = { createEnv };

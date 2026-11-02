@@ -15,7 +15,7 @@ function doPost(e) {
   try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); }
   catch (err) { return json_(fail_('invalid_request')); }
   var cfg = getConfig();
-  var now = new Date();
+  var now = now_();
   try {
     switch (body.action) {
       case 'lead': return json_(handleLead_(cfg, body, now));
@@ -32,11 +32,16 @@ function doPost(e) {
   }
 }
 
+/** Reloj del servidor (las pruebas lo reemplazan para fijar "ahora"). */
+function now_() { return new Date(); }
+
 function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 
 // ── 1) Datos del formulario → Sheets ─────────────────────────
+var ORIGINS_ = { reserva: 'Reserva', analisis: 'Análisis de piel' };
+
 function handleLead_(cfg, body, now) {
   var missing = missingConfig_(cfg).filter(function (m) { return m.indexOf('CALENDAR') < 0; });
   if (missing.length) return fail_('not_configured');
@@ -48,7 +53,8 @@ function handleLead_(cfg, body, now) {
   if (!verifyTurnstile_(body.turnstileToken)) return fail_('captcha_failed');
 
   var errors = {};
-  var name = validateName_(body.name); if (!name) errors.name = 'invalid';
+  var firstName = validatePersonName_(body.firstName); if (!firstName) errors.firstName = 'invalid';
+  var lastName = validatePersonName_(body.lastName); if (!lastName) errors.lastName = 'invalid';
   var phone = normalizeUyMobile_(body.phone); if (!phone) errors.phone = 'invalid';
   var email = validateEmail_(body.email); if (!email) errors.email = 'invalid';
   if (body.consent !== true) errors.consent = 'required';
@@ -70,7 +76,8 @@ function handleLead_(cfg, body, now) {
   var rec = {
     requestId: requestId,
     createdLocal: Utilities.formatDate(now, cfg.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
-    name: name, phone: phone, email: email,
+    firstName: firstName, lastName: lastName, phone: phone, email: email,
+    origin: ORIGINS_[body.origin] || ORIGINS_.reserva,
     marketing: body.marketing === true,
     consentVersion: cfg.CONSENT_VERSION,
     pageUrl: validateUrl_(body.pageUrl),
@@ -85,41 +92,41 @@ function handleLead_(cfg, body, now) {
   return out;
 }
 
-// ── 2) Disponibilidad real ───────────────────────────────────
+// ── 2) Horarios recomendados ─────────────────────────────────
+// Se ofrecen RECOMMEND_COUNT horarios (los más próximos, priorizando las próximas
+// RECOMMEND_WITHIN_HOURS horas). Si ninguno le sirve, la persona escribe por WhatsApp.
 function handleAvailability_(cfg, body, now) {
   if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
-  if (!cfg.PRO_CALENDAR_ID || !cfg.ROOM_CALENDAR_LIST.length) return fail_('calendar_not_configured');
-  var from = parseYmd_(body.from);
-  if (!from) { var lp = localParts_(now, cfg.TIMEZONE); from = { y: lp.y, m: lp.m, d: lp.d }; }
-  var days = Math.min(Math.max(Number(body.days) || 5, 1), cfg.MAX_DAYS_PER_QUERY);
+  if (!cfg.ROOM_CALENDAR_LIST.length) return fail_('calendar_not_configured');
 
   var cache = CacheService.getScriptCache();
-  var ck = 'av:' + (cache.get('av_gen') || '0') + ':' + ymd_(from) + ':' + days;
+  var ck = 'rec:' + (cache.get('av_gen') || '0') + ':' + Math.floor(now.getTime() / 60000);
   var cached = cache.get(ck);
   var result;
   if (cached) result = JSON.parse(cached);
   else {
-    var r = computeAvailability_(cfg, from, days, now);
+    var r = recommendSlots_(cfg, now);
     result = { slots: r.slots.map(publicSlot_), calendarErrors: r.calendarErrors };
     cache.put(ck, JSON.stringify(result), 45); // caché corta: igual se revalida al confirmar
   }
   if (result.calendarErrors) logEvent_(cfg, body.requestId, 'error_lectura_calendario', {});
   if (result.slots.length && !cache.get('vh:' + body.requestId)) {
     cache.put('vh:' + body.requestId, '1', 21600);
-    logEvent_(cfg, body.requestId, 'vio_horarios', { desde: ymd_(from), cantidad: result.slots.length });
+    logEvent_(cfg, body.requestId, 'vio_horarios', { cantidad: result.slots.length, primero: result.slots[0].start });
   }
-  var horizonEnd = new Date(now.getTime() + cfg.HORIZON_DAYS * 86400000);
   return {
-    ok: true, from: ymd_(from), days: days, timezone: cfg.TIMEZONE,
+    ok: true, timezone: cfg.TIMEZONE,
     slots: result.slots,
-    horizonEnd: ymd_(localParts_(horizonEnd, cfg.TIMEZONE)),
+    withinHours: cfg.RECOMMEND_WITHIN_HOURS,
+    durationMin: cfg.DURATION_MIN,
+    whatsapp: cfg.WHATSAPP_NUMBER,
     degraded: !!result.calendarErrors
   };
 }
 
 // ── 3) Reserva ───────────────────────────────────────────────
 function handleBook_(cfg, body, now) {
-  if (!cfg.PRO_CALENDAR_ID || !cfg.ROOM_CALENDAR_LIST.length) return fail_('calendar_not_configured');
+  if (!cfg.ROOM_CALENDAR_LIST.length) return fail_('calendar_not_configured');
   var res = bookSlot_(cfg, body, now);
   if (res.ok && !res.replay) { var c = CacheService.getScriptCache(); c.put('av_gen', String(Number(c.get('av_gen') || 0) + 1), 21600); }
   if (!res.ok && res.code === 'slot_unavailable') { var c2 = CacheService.getScriptCache(); c2.put('av_gen', String(Number(c2.get('av_gen') || 0) + 1), 21600); }

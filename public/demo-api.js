@@ -2,7 +2,7 @@
  * API SIMULADA — solo para revisar la experiencia en local (?demo=1 en localhost).
  * No guarda nada, no toca Google y la página muestra un aviso permanente de MODO DEMO.
  * No se incluye en producción: app.js solo la usa si API_URL está vacío y el host es local.
- * Parámetros de prueba: &conflict=1 (el primer intento de reserva choca) · &empty=1 (sin horarios esta semana)
+ * Parámetros de prueba: &conflict=1 (el primer intento de reserva choca) · &empty=1 (sin horarios) · &wa=59899123456 (WhatsApp)
  */
 (function () {
   var q = new URLSearchParams(location.search);
@@ -11,13 +11,24 @@
   var leads = {};
   function delay(v, ms) { return new Promise(function (r) { setTimeout(function () { r(v); }, ms || 500); }); }
   function ymdAdd(ymd, n) { var a = ymd.split('-'); var d = new Date(Date.UTC(+a[0], +a[1] - 1, +a[2] + n, 15)); return d.toISOString().slice(0, 10); }
+  // Igual que el servidor: los 3 horarios libres más próximos, sin superponerse (martes y jueves de 9 a 13 en la demo).
+  function recommend(exclude) {
+    if (q.get('empty') === '1') return [];
+    var now = Date.now(), soon = now + 24 * 3600000, out = [];
+    slotsFor(new Date(now - 3 * 3600000).toISOString().slice(0, 10), 21).forEach(function (s) {
+      var t = new Date(s.start).getTime();
+      if (out.length >= 3 || s.start === exclude) return;
+      if (out.some(function (o) { return Math.abs(new Date(o.start).getTime() - t) < 3600000; })) return;
+      s.soon = t <= soon; out.push(s);
+    });
+    return out;
+  }
   function slotsFor(from, days) {
     var out = [], now = Date.now();
     for (var i = 0; i < days; i++) {
       var ymd = ymdAdd(from, i), d = new Date(ymd + 'T12:00:00-03:00'), dow = d.getUTCDay();
-      if (dow === 0 || dow === 6) continue;
-      if (q.get('empty') === '1' && i < 5 && ymdAdd(from, 0) <= new Date().toISOString().slice(0, 10) && ymdAdd(from, 6) >= new Date().toISOString().slice(0, 10)) continue;
-      for (var t = 9 * 60; t <= 20 * 60; t += 30) {
+      if (dow !== 2 && dow !== 4) continue;
+      for (var t = 9 * 60; t <= 12 * 60; t += 30) {
         var seed = (+ymd.replace(/-/g, '') + t) % 7;
         if (seed === 0 || seed === 3) continue; // ocupados ficticios
         var hh = ('0' + Math.floor(t / 60)).slice(-2), mm = ('0' + (t % 60)).slice(-2);
@@ -36,8 +47,7 @@
         return delay({ ok: true, requestId: id, token: 'demo', leadEventId: 'lead_' + id }, 700);
       }
       if (b.action === 'availability') {
-        var end = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
-        return delay({ ok: true, slots: slotsFor(b.from, b.days), horizonEnd: end, timezone: 'America/Montevideo' }, 600);
+        return delay({ ok: true, slots: recommend(), withinHours: 24, durationMin: 60, whatsapp: q.get('wa') || '', timezone: 'America/Montevideo' }, 600);
       }
       if (b.action === 'track') return delay({ ok: true }, 50);
       if (b.action === 'analyze') {
@@ -53,7 +63,7 @@
         if (conflictOnce) {
           conflictOnce = false; booked[b.start] = true;
           var d = b.start.slice(0, 10);
-          return delay({ ok: false, code: 'slot_unavailable', alternatives: slotsFor(new Date(b.start).toISOString().slice(0, 10), 3).slice(0, 6) }, 900);
+          return delay({ ok: false, code: 'slot_unavailable', alternatives: recommend(b.start) }, 900);
         }
         booked[b.start] = true;
         var s = new Date(b.start), e = new Date(s.getTime() + 3600000);

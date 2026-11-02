@@ -292,7 +292,7 @@
           <ul class="recap-facts">
             <li>60 minutos · Lic. Jaqueline Mansilla</li>
             <li>Av. Centenario 3090A, Montevideo</li>
-            <li>Lunes a viernes, de 9:00 a 21:00</li>
+            <li>Te proponemos los horarios libres más próximos</li>
           </ul>
         </div>
 
@@ -306,10 +306,17 @@
           <!-- Paso 1: datos -->
           <form id="leadForm" class="panel" novalidate data-panel="1">
             <h3 class="panel-title">Completá tus datos</h3>
-            <div class="field">
-              <label for="f-name">Nombre y apellido</label>
-              <input id="f-name" name="name" autocomplete="name" required maxlength="80" aria-describedby="e-name">
-              <p class="err" id="e-name" hidden>Escribí tu nombre y apellido.</p>
+            <div class="field-row">
+              <div class="field">
+                <label for="f-firstName">Nombre</label>
+                <input id="f-firstName" name="firstName" autocomplete="given-name" required maxlength="60" aria-describedby="e-firstName">
+                <p class="err" id="e-firstName" hidden>Escribí tu nombre.</p>
+              </div>
+              <div class="field">
+                <label for="f-lastName">Apellido</label>
+                <input id="f-lastName" name="lastName" autocomplete="family-name" required maxlength="60" aria-describedby="e-lastName">
+                <p class="err" id="e-lastName" hidden>Escribí tu apellido.</p>
+              </div>
             </div>
             <div class="field">
               <label for="f-phone">Celular</label>
@@ -342,16 +349,14 @@
 
           <!-- Paso 2: horarios -->
           <div class="panel" data-panel="2" hidden>
-            <h3 class="panel-title">Elegí día y horario</h3>
-            <p class="tz-note">Horarios de Montevideo (UTC−3). Sesión de 60 minutos.</p>
-            <div class="weeknav">
-              <button type="button" class="icon-btn" id="prevWeek" aria-label="Semana anterior"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6 8.5 12l6 6"/></svg></button>
-              <p id="weekLabel" aria-live="polite"></p>
-              <button type="button" class="icon-btn" id="nextWeek" aria-label="Semana siguiente"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
-            </div>
-            <div class="days" id="days" role="radiogroup" aria-label="Día"></div>
-            <div class="slots" id="slots" role="radiogroup" aria-label="Horario"></div>
+            <h3 class="panel-title">Elegí tu horario</h3>
+            <p class="tz-note">Estos son los horarios libres más próximos. Hora de Montevideo, sesión de 60 minutos.</p>
+            <div class="recs" id="slots" role="radiogroup" aria-label="Horarios recomendados"></div>
             <div class="slot-state" id="slotState" role="status"></div>
+            <div class="wa-help" id="waHelp" hidden>
+              <p>¿Ninguno de estos horarios te sirve?</p>
+              <a class="btn btn-ghost btn-block" id="waLink" target="_blank" rel="noopener">Escribinos por WhatsApp</a>
+            </div>
 
             <div class="confirm-box" id="confirmBox" hidden>
               <p class="confirm-when" id="confirmWhen"></p>
@@ -401,7 +406,7 @@
           <details><summary>¿Es para mujeres y hombres?</summary><p>Sí, la limpieza facial profunda es para mujeres y hombres.</p></details>
           <details><summary>¿Qué incluye?</summary><p>Según la evaluación de tu piel: higiene y preparación, exfoliación manual y con puntas de diamante, extracción de puntos negros y quistes de milium cuando corresponda, máscara descongestiva, activos seleccionados, lámpara LED según criterio profesional, hidratación y protección de rostro y cuello, y orientación para tu rutina en casa. No incluye peeling químico.</p></details>
           <details><summary>¿Se adapta a mi tipo de piel?</summary><p>Sí. Al comienzo se evalúa tu piel y, según eso, se eligen las técnicas y los activos. Por eso no todas las técnicas se usan en todas las personas.</p></details>
-          <details><summary>¿Dónde se realiza?</summary><p>En Clínica Centenario, Av. Centenario 3090A, Montevideo. Atendemos de lunes a viernes, de 9:00 a 21:00.</p></details>
+          <details><summary>¿Dónde se realiza?</summary><p>En Clínica Centenario, Av. Centenario 3090A, Montevideo. La clínica abre de lunes a viernes, de 9:00 a 21:00; los horarios disponibles para esta sesión te los mostramos al reservar.</p></details>
           <details><summary>¿Cómo reservo?</summary><p>Completá tus datos, elegí un horario disponible y confirmá. Solo te mostramos horarios en los que la profesional y el consultorio están libres.</p></details>
           <details><summary>¿Cómo accedo al descuento por pago anticipado?</summary><p id="faqPayment">El precio de $1.824 (20% de descuento sobre $2.280) corresponde cuando la sesión se paga por adelantado. Reservar no implica pagar: si no se concreta el pago anticipado, el precio es el de lista.</p></details>
         </div>

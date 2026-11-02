@@ -1,7 +1,7 @@
 # Landing · Limpieza facial profunda · Clínica Centenario
 
 Landing de captación y reserva para la limpieza facial profunda personalizada con la Lic. Jaqueline Mansilla.
-Flujo: **datos → guardado en Sheets → horarios reales → elección → confirmación en ambos calendarios → actualización de la misma fila → confirmación en pantalla.**
+Flujo: **datos (nombre, apellido, celular, correo) → guardado en la planilla "Datos Landing" → 3 horarios recomendados → elección (o WhatsApp si ninguno sirve) → confirmación en el calendario del consultorio → actualización de la misma fila → confirmación en pantalla.**
 
 > **Estado:** no publicada. La página lleva `noindex` hasta que se indique publicar.
 
@@ -19,7 +19,7 @@ public/                 ← lo que se sube al sitio (estático, sin build)
   demo-api.js           API simulada, solo localhost + ?demo=1 (no subir a producción)
   img/                  logo, favicon e imagen principal (AVIF/WebP/JPG)
   media/                videos H.264 sin audio ni metadatos + portadas
-backend/                ← proyecto de Google Apps Script (cuenta ccentenario3090@gmail.com)
+backend/                ← Apps Script vinculado a la planilla "Datos Landing" (cuenta ccentenario3090@gmail.com)
   Config.gs             ★ parámetros operativos (sobrescribibles por Propiedades del script)
   Code.gs               endpoints: lead · availability · book · track
   Availability.gs       cruce profesional × consultorios, zona horaria
@@ -28,7 +28,7 @@ backend/                ← proyecto de Google Apps Script (cuenta ccentenario30
   Security.gs           validación, anti-fórmulas, tokens, antispam
   Analysis.gs           análisis de piel con IA (orientación cosmética, no diagnóstico)
   Capi.gs               Meta Conversions API (opcional)
-  Setup.gs              setupSecrets · setupSheet · checkCalendars · cleanupTestEvents
+  Setup.gs              configurarTodo · setupSecrets · setupSheet · setupRoomCalendar · checkCalendars · cleanupTestEvents
   appsscript.json       manifiesto (servicio avanzado Calendar v3 y permisos mínimos)
 tests/
   backend.test.js       25 pruebas del backend real con Google simulado (node --test)
@@ -55,10 +55,10 @@ tools/process_photos.py revelado de RAW y exportación web
 
 ## 3. Cómo se calcula la disponibilidad
 
-1. Se generan los inicios posibles: lunes a viernes, 9:00 a 21:00, último inicio 20:00, cada 30 min, respetando anticipación mínima, horizonte y fechas cerradas.
-2. Se consulta **free/busy** de Jaqueline y de cada consultorio habilitado en una sola llamada. Free/busy expande eventos recurrentes, cuenta bloqueos y ausencias, **no cuenta eventos marcados "Disponible"** y no expone títulos ni pacientes.
-3. Primero se filtra por Jaqueline libre los 60 min completos (más márgenes), después se exige al menos **un** consultorio libre en esa ventana.
-4. Si un calendario no se puede leer, se considera **no disponible** (falla cerrada) y se registra `error_lectura_calendario` en la pestaña Eventos.
+1. **Franjas de atención:** se leen de la pestaña **Horarios** de "Datos Landing" (una fila por franja: día, desde, hasta, activo). Se puede repetir un día para tener dos franjas. Un turno puede empezar desde "Desde" y tiene que terminar a más tardar en "Hasta". Las fechas de la pestaña **Días cerrados** se saltean. Duración, intervalo entre inicios, anticipación mínima, horizonte y márgenes salen de la pestaña **Configuración**. Los cambios se ven en la landing en menos de un minuto.
+2. Se consulta **free/busy** del consultorio **Con 3 - Camilla 1** (y de la profesional, solo si algún día se configura `PRO_CALENDAR_ID`). Free/busy expande eventos recurrentes, **no cuenta eventos marcados "Disponible"** y no expone títulos ni pacientes.
+3. **Recomendación:** se ofrecen los **3 horarios libres más próximos**, sin superponerse entre sí, empezando por los de las **próximas 24 h** (marcados "Próximas 24 h"). Si no hay lugar en 24 h, se ofrecen igual los siguientes más cercanos. Si ninguno le sirve, la persona escribe por **WhatsApp** (número de la pestaña Configuración) con su número de solicitud.
+4. Si la planilla o un calendario no se pueden leer, no se ofrecen horarios (falla cerrada) y se registra `error_lectura_calendario` en la pestaña Eventos.
 
 Al navegador solo llegan inicio y hora; nunca qué consultorio ni qué ocupa los huecos.
 
@@ -83,13 +83,16 @@ Al confirmar, el servidor:
 - **Eventos con prefijo "2 -" (cancelados dentro de las 24 h):** free/busy no lee títulos, así que esos eventos **siguen bloqueando** el consultorio. Es la opción conservadora; si querés liberarlos, hay que pasar a leer eventos completos (decisión pendiente).
 - Cuotas de Apps Script (cuenta gratuita): de sobra para el volumen de una clínica.
 
-## 5. Planilla
+## 5. Planilla "Datos Landing"
 
-`setupSheet()` crea **"Clínica Centenario — Limpieza facial — Solicitudes"** con:
+Está en el Drive de ccentenario3090@gmail.com. El script la completa con `setupSheet()` sin borrar lo que cargó el equipo.
 
-- **Contactos:** una fila por solicitud; columnas del brief, incluidas UTM, versión y fecha del consentimiento, estado de reserva y **estado de pago por separado** ("Sin pago registrado" hasta que alguien lo cambie a mano). Si la misma persona vuelve a enviar, se crea otra fila y la columna *Solicitudes previas* referencia las anteriores; nunca se sobrescribe.
-- **Eventos:** datos_recibidos, vio_horarios, eligio_horario, horario_ocupado_al_confirmar, conflicto_detectado_post_escritura, reserva_confirmada, errores. Esto mide el embudo aunque el navegador bloquee el píxel.
-- **Configuración:** parámetros no sensibles a modo de referencia (nunca tokens).
+- **Contactos:** una fila por solicitud: nombre, apellido, celular, correo, origen (Reserva / Análisis de piel), UTM, versión y fecha del consentimiento, estado de reserva y **estado de pago por separado** ("Sin pago registrado" hasta que alguien lo cambie a mano). Si la misma persona vuelve a enviar, se crea otra fila y *Solicitudes previas* referencia las anteriores.
+- **Horarios:** días y franjas en que se puede reservar. La carga el equipo cuando la Lic. Mansilla avisa su disponibilidad.
+- **Días cerrados:** feriados o licencias (AAAA-MM-DD o DD/MM/AAAA).
+- **Configuración:** duración, intervalo, anticipación, horizonte, ventana y cantidad de recomendaciones, márgenes y WhatsApp. El script lee la columna *Clave*; no cambiarla.
+- **Análisis de piel:** reservada para la etapa del análisis con IA (resultado, nunca la foto).
+- **Eventos:** datos_recibidos, vio_horarios, eligio_horario, horario_ocupado_al_confirmar, conflicto_detectado_post_escritura, reserva_confirmada, errores.
 - **Conciliación:** casos que requieren revisión manual.
 
 Todo valor que empiece con `=`, `+`, `-`, `@`, tabulación o retorno se guarda como texto.
@@ -109,22 +112,18 @@ Ningún evento lleva nombre, celular, email ni datos de piel. El píxel se carga
 
 ## 7. Puesta en marcha (paso a paso)
 
-Todo con la cuenta **ccentenario3090@gmail.com**. Nunca compartas contraseñas ni tokens por chat.
+Todo con la cuenta **ccentenario3090@gmail.com**. Nunca compartas contraseñas ni tokens por chat. **Este repositorio es público:** IDs de planilla y calendarios, secretos y `.clasp.json` van solo en Propiedades del script o fuera del repo.
 
-1. **Calendario de Jaqueline.** Que ella lo comparta con `ccentenario3090@gmail.com` con permiso **"Hacer cambios en los eventos"**. Su ID está en Google Calendar → Configuración del calendario → *Integrar el calendario* → *ID del calendario*.
-2. **Consultorios habilitados.** Definir cuáles sirven para este tratamiento. IDs disponibles en la cuenta: Consultorio 1 `g1kstfglridfejoiqhup5mqovs@group.calendar.google.com` · Consultorio 2 `e3ujj47vavclddl9ugpra451rc@group.calendar.google.com` · Consultorio 5 `oeful3qgjf8se7rm4eprpmbffs@group.calendar.google.com` · Con 3 - Camilla 1 `qfh8nkq5vjkr8qmrormmfimfek@group.calendar.google.com` · Con 3 - Camilla 2 `0cfql63pn1kc97iqkjg14ij6g8@group.calendar.google.com` · Con 3 - Camilla 3 `80eatamkvlhl35sp45q0bpmv68@group.calendar.google.com` · Con 3 - Camilla 4 `2rh7bvmeuiatrjq9fju4gb39kk@group.calendar.google.com`.
-3. **Proyecto de Apps Script.** script.google.com → Nuevo proyecto → crear un archivo por cada `.gs` de `backend/` y pegar su contenido. En Configuración del proyecto, activar *Mostrar el archivo de manifiesto* y reemplazar `appsscript.json`.
-4. **Propiedades del script** (Configuración del proyecto → Propiedades del script):
-   - `PRO_CALENDAR_ID` = ID de Jaqueline
-   - `ROOM_CALENDAR_IDS` = IDs habilitados separados por coma, en orden de preferencia
-   - `ROOM_LABELS` = sus nombres en el mismo orden (p. ej. `Consultorio 5,Con 3 - Camilla 1`)
-   - `ENV` = `development` para probar
-5. **Ejecutar desde el editor**, en orden: `setupSecrets` → `setupSheet` → `checkCalendars`. La primera vez Google pide autorizar los permisos del manifiesto. `checkCalendars` debe mostrar *free/busy: OK* y rol *writer* u *owner* en todos.
-6. **Implementar** → Nueva implementación → Aplicación web → *Ejecutar como: Yo* · *Quién tiene acceso: Cualquier persona*. Copiar la URL que termina en `/exec` en `public/config.js` → `API_URL`.
-7. **Probar en development:** hacer una reserva de punta a punta. Verificar los eventos `[TEST]` en ambos calendarios y la fila en Contactos. Limpiar con `cleanupTestEvents()`.
-8. **Meta:** cargar `META_PIXEL_ID` en `config.js`. Para CAPI (opcional): `CAPI_ENABLED=true`, `META_PIXEL_ID` y el secreto `META_CAPI_TOKEN` en Propiedades del script. `CAPI_TEST_EVENT_CODE` sirve para validar en el Administrador de eventos.
-9. **Antispam reforzado (opcional):** Cloudflare Turnstile → `TURNSTILE_SITE_KEY` en `config.js` y `TURNSTILE_SECRET` en Propiedades del script.
-10. **Publicar (cuando se indique):** `ENV=production`, quitar la línea `noindex` de `index.html`, ajustar `CANONICAL_URL` y subir `public/` sin `demo-api.js`. Cada cambio de código del script requiere *Administrar implementaciones → Editar → Nueva versión* (la URL se mantiene).
+1. **Script vinculado a la planilla.** Con clasp logueado en ccentenario3090: `clasp create-script --type sheets --parentId <ID de Datos Landing> --rootDir backend` y `clasp push`. (A mano: en la planilla, Extensiones → Apps Script, un archivo por cada `.gs` y el manifiesto `appsscript.json`.)
+2. **Ejecutar `configurarTodo`** desde el editor. La primera vez Google pide autorizar los permisos. Guarda `LEAD_SECRET`, `SHEET_ID` y el ID del calendario **Con 3 - Camilla 1** en Propiedades del script, y `checkCalendars` debe mostrar *free/busy: OK* y rol *writer* u *owner*.
+3. **Cargar en la planilla** las franjas reales en **Horarios** y el número en **Configuración → WhatsApp de contacto**.
+4. **Implementar** → Nueva implementación → Aplicación web → *Ejecutar como: Yo* · *Quién tiene acceso: Cualquier persona*. Copiar la URL que termina en `/exec` en `public/config.js` → `API_URL`.
+5. **Probar en development** (`ENV=development`): reserva de punta a punta. Verificar el evento `[TEST]` en el calendario del consultorio y la fila en Contactos. Limpiar con `cleanupTestEvents()`.
+6. **Meta:** cargar `META_PIXEL_ID` en `config.js`. Para CAPI (opcional): `CAPI_ENABLED=true`, `META_PIXEL_ID` y el secreto `META_CAPI_TOKEN` en Propiedades del script.
+7. **Antispam reforzado (opcional):** Cloudflare Turnstile → `TURNSTILE_SITE_KEY` en `config.js` y `TURNSTILE_SECRET` en Propiedades del script.
+8. **Publicar (cuando se indique):** `ENV=production`, quitar la línea `noindex` de `index.html`, ajustar `CANONICAL_URL`. Cada cambio de código del script requiere *Administrar implementaciones → Editar → Nueva versión* (la URL se mantiene).
+
+**Calendario de la profesional (opcional):** hoy no se usa; la disponibilidad la carga el equipo en Horarios. Si más adelante se quiere cruzar y escribir también en su calendario, cargar `PRO_CALENDAR_ID` en Propiedades del script.
 
 ## 7 bis. Análisis de piel con IA
 
@@ -148,24 +147,21 @@ La persona sube o saca una foto, marca que es mayor de 18 y que acepta el análi
 
 | Dato | Dónde se carga | Mientras falte |
 |---|---|---|
-| ID del calendario de Jaqueline | Propiedad `PRO_CALENDAR_ID` | Se guardan los datos; la agenda informa que no está habilitada |
-| Consultorios habilitados | Propiedad `ROOM_CALENDAR_IDS` (+ `ROOM_LABELS`) | Ídem |
-| Autorización de Google | Paso 5 | El script no corre |
-| ID de la planilla | Automático con `setupSheet()` (o propiedad `SHEET_ID`) | El formulario responde "no habilitado" |
+| Franjas reales de atención | Planilla → Horarios | Quedan las de ejemplo (martes y jueves 9 a 13) |
+| WhatsApp de contacto | Planilla → Configuración | No se muestra el botón de WhatsApp |
+| Despliegue del script y `API_URL` | Paso 1 a 4 | El formulario responde "no habilitado" |
 | ID del píxel de Meta | `config.js` → `META_PIXEL_ID` | No se carga el píxel ni se pide consentimiento |
 | Medio de pago y plazo del descuento | `config.js` → `PAYMENT` | Solo se explica que el descuento es por pago anticipado efectivo |
-| Anticipación mínima | Propiedad `MIN_NOTICE_HOURS` | 0 (solo excluye horarios pasados) |
 | Cancelación y reprogramación | `config.js` → `CANCELLATION_POLICY` | No se muestra; no hay autogestión de cambios |
 | Canal para derechos de datos personales | `config.js` → `PRIVACY_CONTACT` | El aviso no nombra canal |
 | URL definitiva | `config.js` → `CANONICAL_URL` y `index.html` | Se usa `/limpieza-facial` |
-| Clave de IA para el análisis de piel | Secreto `ANTHROPIC_API_KEY` + `AI_ENABLED=true` | La sección informa que el análisis no está disponible |
-| Feriados o cierres | Propiedad `CLOSED_DATES` | Se agenda cualquier día hábil libre en los calendarios |
+| Análisis de piel con IA | Otra etapa: `ANTHROPIC_API_KEY`, `AI_ENABLED=true` y `AI_ANALYSIS_ENABLED` | La sección no se muestra |
 
 ## 9. Pruebas
 
 ```bash
-node --test tests/backend.test.js tests/analysis.test.js   # backend (25 + 8)
-pip install playwright && python3 -I tests/e2e_mobile.py public /tmp/capturas   # front móvil (31)
+node --test tests/backend.test.js tests/analysis.test.js   # backend (31 + 8)
+pip install playwright && python3 -I tests/e2e_mobile.py public /tmp/capturas   # front móvil (35), usa Google Chrome o CHROME_PATH
 ```
 
-Revisión visual sin backend: servir `public/` en `localhost` y abrir `index.html?demo=1` (aviso permanente de MODO DEMO; `&conflict=1` simula que el horario se ocupó).
+Revisión visual sin backend: servir `public/` en `localhost` y abrir `index.html?demo=1` (aviso permanente de MODO DEMO; `&conflict=1` simula que el horario se ocupó, `&empty=1` sin horarios, `&wa=59899123456` muestra el botón de WhatsApp).

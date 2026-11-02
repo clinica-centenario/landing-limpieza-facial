@@ -5,14 +5,17 @@
  */
 
 var TAB_CONTACTS = 'Contactos';
-var TAB_EVENTS = 'Eventos';
+var TAB_HOURS = 'Horarios';
+var TAB_CLOSED = 'Días cerrados';
 var TAB_CONFIG = 'Configuración';
+var TAB_ANALYSIS = 'Análisis de piel';
+var TAB_EVENTS = 'Eventos';
 var TAB_RECON = 'Conciliación';
 
 var CONTACT_HEADERS = [
-  'ID solicitud', 'Creada', 'Nombre y apellido', 'Celular', 'Email',
-  'Estado reserva', 'Fecha reservada', 'Hora reservada', 'Profesional', 'Consultorio',
-  'ID reserva', 'ID evento profesional', 'ID evento consultorio',
+  'ID solicitud', 'Creada', 'Nombre', 'Apellido', 'Celular', 'Email', 'Origen',
+  'Estado reserva', 'Fecha reservada', 'Hora reservada', 'Consultorio',
+  'ID reserva', 'ID evento consultorio',
   'Precio lista (UYU)', 'Precio pago anticipado ofrecido (UYU)', 'Estado de pago',
   'Consentimiento versión', 'Consentimiento fecha', 'Acepta novedades',
   'URL origen', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid',
@@ -20,6 +23,12 @@ var CONTACT_HEADERS = [
 ];
 var EVENT_HEADERS = ['Fecha', 'ID solicitud', 'Evento', 'Detalle', 'Entorno'];
 var RECON_HEADERS = ['Fecha', 'ID solicitud', 'ID reserva', 'Problema', 'Datos para resolver', 'Resuelto'];
+var HOURS_HEADERS = ['Día', 'Desde', 'Hasta', 'Activo', 'Nota'];
+var CLOSED_HEADERS = ['Fecha (AAAA-MM-DD)', 'Motivo'];
+var CONFIG_HEADERS = ['Parámetro', 'Valor', 'Nota', 'Clave (no modificar)'];
+var ANALYSIS_HEADERS = ['ID análisis', 'Fecha', 'ID solicitud', 'Nombre', 'Apellido', 'Celular', 'Email', 'Tipo de piel',
+                        'Observaciones', 'Foco sugerido para la sesión', 'Cuidados en casa', 'Reservó', 'Entorno'];
+var DAY_NAMES_ = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 
 var STATUS = {
   RECEIVED: 'Datos recibidos',
@@ -29,55 +38,140 @@ var STATUS = {
 var PAYMENT_STATUS_DEFAULT = 'Sin pago registrado';
 
 /**
- * Ejecutar UNA vez desde el editor (cuenta ccentenario3090@gmail.com).
- * Crea la planilla si SHEET_ID está vacío, o completa pestañas faltantes.
+ * Ejecutar desde el editor del script vinculado a "Datos Landing" (cuenta ccentenario3090@gmail.com).
+ * Guarda SHEET_ID en Propiedades del script y completa solo las pestañas que falten:
+ * nunca borra horarios ni configuración cargados por el equipo.
  */
 function setupSheet() {
   var props = PropertiesService.getScriptProperties();
   var cfg = getConfig();
-  var ss = cfg.SHEET_ID ? SpreadsheetApp.openById(cfg.SHEET_ID)
-                        : SpreadsheetApp.create('Clínica Centenario — Limpieza facial — Solicitudes');
+  var ss = cfg.SHEET_ID ? SpreadsheetApp.openById(cfg.SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error('Abrí el script desde la planilla (Extensiones → Apps Script) o cargá SHEET_ID en Propiedades del script.');
   ss.setSpreadsheetTimeZone(cfg.TIMEZONE);
   ensureTab_(ss, TAB_CONTACTS, CONTACT_HEADERS);
+  ensureTab_(ss, TAB_HOURS, HOURS_HEADERS, DAY_NAMES_.map(function (d) { return [d, '', '', 'No', '']; }));
+  ensureTab_(ss, TAB_CLOSED, CLOSED_HEADERS);
+  ensureTab_(ss, TAB_CONFIG, CONFIG_HEADERS, defaultConfigRows_());
+  ensureTab_(ss, TAB_ANALYSIS, ANALYSIS_HEADERS);
   ensureTab_(ss, TAB_EVENTS, EVENT_HEADERS);
   ensureTab_(ss, TAB_RECON, RECON_HEADERS);
-  writeConfigTab_(ss, cfg);
   var def = ss.getSheetByName('Hoja 1') || ss.getSheetByName('Sheet1');
   if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
   props.setProperty('SHEET_ID', ss.getId());
+  clearSheetSettingsCache_();
   Logger.log('Planilla lista: ' + ss.getUrl());
   return ss.getUrl();
 }
 
-function ensureTab_(ss, name, headers) {
+/** Crea la pestaña con encabezados (y filas iniciales) solo si está vacía. */
+function ensureTab_(ss, name, headers, initialRows) {
   var sh = ss.getSheetByName(name) || ss.insertSheet(name);
   if (sh.getLastRow() === 0) {
     sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e9eddd');
     sh.setFrozenRows(1);
+    // Todo como texto plano: refuerzo adicional contra fórmulas y conversiones automáticas.
+    sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), headers.length).setNumberFormat('@');
+    if (initialRows && initialRows.length) sh.getRange(2, 1, initialRows.length, headers.length).setValues(initialRows);
   }
-  // Todo como texto plano: refuerzo adicional contra fórmulas.
-  sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), headers.length).setNumberFormat('@');
   return sh;
 }
 
-/** Parámetros operativos NO sensibles, como referencia para el equipo. */
-function writeConfigTab_(ss, cfg) {
-  var sh = ss.getSheetByName(TAB_CONFIG) || ss.insertSheet(TAB_CONFIG);
-  sh.clear();
-  var rows = [['Parámetro', 'Valor', 'Nota']];
-  ['ENV', 'TIMEZONE', 'WORKING_DAYS', 'OPEN_TIME', 'CLOSE_TIME', 'LAST_START_TIME', 'DURATION_MIN',
-   'SLOT_STEP_MIN', 'BUFFER_BEFORE_MIN', 'BUFFER_AFTER_MIN', 'MIN_NOTICE_HOURS', 'HORIZON_DAYS',
-   'CLOSED_DATES', 'LIST_PRICE_UYU', 'PREPAID_PRICE_UYU', 'CONSENT_VERSION'].forEach(function (k) {
-    rows.push([k, String(cfg[k]), '']);
+function defaultConfigRows_() {
+  var d = DEFAULT_CONFIG;
+  return [
+    ['Duración de la sesión (min)', String(d.DURATION_MIN), '', 'DURATION_MIN'],
+    ['Intervalo entre inicios (min)', String(d.SLOT_STEP_MIN), 'Cada cuánto puede empezar un turno', 'SLOT_STEP_MIN'],
+    ['Anticipación mínima (horas)', String(d.MIN_NOTICE_HOURS), '0 = solo se ocultan los horarios ya pasados', 'MIN_NOTICE_HOURS'],
+    ['Días hacia adelante para reservar', String(d.HORIZON_DAYS), '', 'HORIZON_DAYS'],
+    ['Ventana de recomendación (horas)', String(d.RECOMMEND_WITHIN_HOURS), 'Se priorizan los horarios libres dentro de esta ventana', 'RECOMMEND_WITHIN_HOURS'],
+    ['Horarios a recomendar', String(d.RECOMMEND_COUNT), '', 'RECOMMEND_COUNT'],
+    ['Margen antes de la sesión (min)', String(d.BUFFER_BEFORE_MIN), '', 'BUFFER_BEFORE_MIN'],
+    ['Margen después de la sesión (min)', String(d.BUFFER_AFTER_MIN), '', 'BUFFER_AFTER_MIN'],
+    ['WhatsApp de contacto', d.WHATSAPP_NUMBER, 'Número con código de país, sin espacios. Ej.: 59899123456', 'WHATSAPP_NUMBER']
+  ];
+}
+
+// ── Lectura de Horarios, Días cerrados y Configuración ───────
+
+var SHEET_SETTINGS_CACHE_KEY_ = 'sheet_settings_v1';
+
+/**
+ * { weekly: {1..7: [{from,to}]}, closed: ['YYYY-MM-DD'], params: {CLAVE: 'valor'} }
+ * Caché de 60 s: un cambio en la planilla se ve en la landing en menos de un minuto.
+ * Si la planilla no se puede leer, devuelve todo vacío → no se ofrecen horarios.
+ */
+function readSheetSettings_(sheetId, tz) {
+  var empty = { weekly: {}, closed: [], params: {} };
+  if (!sheetId) return empty;
+  var cache = null;
+  try { cache = CacheService.getScriptCache(); var hit = cache.get(SHEET_SETTINGS_CACHE_KEY_); if (hit) return JSON.parse(hit); } catch (e) {}
+  var out;
+  try {
+    var ss = SpreadsheetApp.openById(sheetId);
+    out = {
+      weekly: parseWeekly_(displayRows_(ss.getSheetByName(TAB_HOURS))),
+      closed: parseClosedDates_(displayRows_(ss.getSheetByName(TAB_CLOSED))),
+      params: parseParams_(displayRows_(ss.getSheetByName(TAB_CONFIG)))
+    };
+  } catch (e) {
+    console.warn('No se pudo leer la configuración de la planilla: ' + shortErr_(e));
+    return empty;
+  }
+  try { cache.put(SHEET_SETTINGS_CACHE_KEY_, JSON.stringify(out), 60); } catch (e) {}
+  return out;
+}
+
+function clearSheetSettingsCache_() {
+  try { CacheService.getScriptCache().remove(SHEET_SETTINGS_CACHE_KEY_); } catch (e) {}
+}
+
+/** Filas de datos (sin encabezado) tal como se ven en la planilla. */
+function displayRows_(sh) {
+  if (!sh || sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(sh.getLastColumn(), 1)).getDisplayValues();
+}
+
+function normalizeWord_(s) {
+  return String(s || '').toLowerCase().trim().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e')
+    .replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u');
+}
+
+/** Horarios: una fila por franja. Se puede repetir el día para tener varias franjas. */
+function parseWeekly_(rows) {
+  var days = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 7 };
+  var weekly = {};
+  rows.forEach(function (r) {
+    var dow = days[normalizeWord_(r[0])];
+    var active = /^(si|s|x|true|verdadero)$/.test(normalizeWord_(r[3]));
+    var from = parseSheetTime_(r[1]), to = parseSheetTime_(r[2]);
+    if (!dow || !active || from === null || to === null || to <= from) return;
+    (weekly[dow] = weekly[dow] || []).push({ from: from, to: to });
   });
-  rows.push(['Calendario profesional configurado', cfg.PRO_CALENDAR_ID ? 'Sí' : 'PENDIENTE', 'El ID vive en Propiedades del script']);
-  rows.push(['Consultorios habilitados', cfg.ROOM_CALENDAR_LIST.length ? String(cfg.ROOM_CALENDAR_LIST.length) : 'PENDIENTE', cfg.ROOM_LABELS]);
-  rows.push(['Medio de pago / plazo del descuento', 'PENDIENTE', 'No publicado en la landing hasta definirlo']);
-  rows.push(['Reglas de cancelación / reprogramación', 'PENDIENTE', '']);
-  rows.push(['Nota', 'Esta pestaña es informativa. La configuración efectiva está en el script.', 'Nunca guardar tokens ni contraseñas acá.']);
-  rows = rows.map(function (r) { return r.map(sheetSafe_); });
-  sh.getRange(1, 1, rows.length, 3).setValues(rows);
-  sh.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#e9eddd');
+  return weekly;
+}
+
+/** Acepta 2026-12-25 y 25/12/2026. */
+function parseClosedDates_(rows) {
+  var out = [];
+  rows.forEach(function (r) {
+    var s = String(r[0] || '').trim(), m;
+    if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s))) out.push(m[1] + '-' + pad2_(+m[2]) + '-' + pad2_(+m[3]));
+    else if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s))) out.push(m[3] + '-' + pad2_(+m[2]) + '-' + pad2_(+m[1]));
+  });
+  return out;
+}
+
+/** Configuración: se lee por la columna "Clave"; solo claves conocidas. */
+function parseParams_(rows) {
+  var out = {};
+  rows.forEach(function (r) {
+    var k = String(r[3] || '').trim();
+    if (SHEET_KEYS_.indexOf(k) < 0) return;
+    var v = String(r[1] == null ? '' : r[1]).trim();
+    if (k !== 'WHATSAPP_NUMBER' && v !== '' && !/^\d+$/.test(v)) return; // valores numéricos inválidos se ignoran
+    out[k] = v;
+  });
+  return out;
 }
 
 function openSS_(cfg) { return SpreadsheetApp.openById(cfg.SHEET_ID); }
@@ -132,9 +226,11 @@ function appendContact_(cfg, rec) {
     var tag = cfg.ENV === 'production' ? '' : '[TEST] ';
     set('ID solicitud', rec.requestId);
     set('Creada', rec.createdLocal);
-    set('Nombre y apellido', tag + rec.name);
+    set('Nombre', tag + rec.firstName);
+    set('Apellido', rec.lastName);
     set('Celular', rec.phone);
     set('Email', rec.email);
+    set('Origen', rec.origin);
     set('Estado reserva', STATUS.RECEIVED);
     set('Precio lista (UYU)', String(cfg.LIST_PRICE_UYU));
     set('Precio pago anticipado ofrecido (UYU)', String(cfg.PREPAID_PRICE_UYU));

@@ -115,7 +115,6 @@
   }
   function ymdToUtcNoon(ymd) { var a = ymd.split('-'); return new Date(Date.UTC(+a[0], +a[1] - 1, +a[2], 15)); } // 12:00 en UY
   function addDays(ymd, n) { var d = ymdToUtcNoon(ymd); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
-  function mondayOf(ymd) { var d = ymdToUtcNoon(ymd); var dow = d.getUTCDay() || 7; return addDays(ymd, 1 - dow); }
   function longDate(ymd) { return cap(fmt(ymdToUtcNoon(ymd), { weekday: 'long', day: 'numeric', month: 'long' })); }
   function endTime(startIso, min) { return fmt(new Date(new Date(startIso).getTime() + min * 60000), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); }
 
@@ -152,7 +151,7 @@
     if (/^0/.test(d)) d = d.slice(1);
     return /^9\d{7}$/.test(d) ? '+598' + d : null;
   }
-  function validName(s) { s = s.replace(/\s+/g, ' ').trim(); return s.length >= 4 && /^[A-Za-zÀ-ÖØ-öø-ÿÑñ' .\-]+$/.test(s) && s.split(' ').filter(Boolean).length >= 2; }
+  function validName(s) { s = s.replace(/\s+/g, ' ').trim(); return /^[A-Za-zÀ-ÖØ-öø-ÿÑñ' .\-]+$/.test(s) && s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÑñ]/g, '').length >= 2; }
   function validEmail(s) { return /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[a-z]{2,}$/i.test(s.trim()); }
 
   function showErr(field, show) {
@@ -160,10 +159,10 @@
     if (input) input.setAttribute('aria-invalid', show ? 'true' : 'false');
     if (err) err.hidden = !show;
   }
-  ['name', 'phone', 'email'].forEach(function (f) {
+  ['firstName', 'lastName', 'phone', 'email'].forEach(function (f) {
     $('#f-' + f).addEventListener('blur', function () {
       var v = this.value; if (!v) return;
-      showErr(f, !(f === 'name' ? validName(v) : f === 'phone' ? normalizePhone(v) : validEmail(v)));
+      showErr(f, !(f === 'phone' ? normalizePhone(v) : f === 'email' ? validEmail(v) : validName(v)));
     });
     $('#f-' + f).addEventListener('input', function () { if (this.getAttribute('aria-invalid') === 'true') showErr(f, false); });
   });
@@ -172,20 +171,20 @@
   form.addEventListener('submit', function (e) {
     e.preventDefault();
     if (sending) return; // evita doble envío
-    var v = { name: $('#f-name').value, phone: $('#f-phone').value, email: $('#f-email').value, consent: $('#f-consent').checked };
-    var bad = { name: !validName(v.name), phone: !normalizePhone(v.phone), email: !validEmail(v.email), consent: !v.consent };
+    var v = { firstName: $('#f-firstName').value, lastName: $('#f-lastName').value, phone: $('#f-phone').value, email: $('#f-email').value, consent: $('#f-consent').checked };
+    var bad = { firstName: !validName(v.firstName), lastName: !validName(v.lastName), phone: !normalizePhone(v.phone), email: !validEmail(v.email), consent: !v.consent };
     Object.keys(bad).forEach(function (k) { showErr(k, bad[k]); });
-    var firstBad = ['name', 'phone', 'email', 'consent'].filter(function (k) { return bad[k]; })[0];
+    var firstBad = ['firstName', 'lastName', 'phone', 'email', 'consent'].filter(function (k) { return bad[k]; })[0];
     if (firstBad) { $('#f-' + firstBad).focus(); status(leadStatus, 'Revisá los datos marcados.', 'error'); return; }
 
     // Misma combinación de datos → misma clave: un reintento no crea otra solicitud.
-    var fp = [v.name.trim(), normalizePhone(v.phone), v.email.trim().toLowerCase(), $('#f-marketing').checked].join('|');
+    var fp = [v.firstName.trim(), v.lastName.trim(), normalizePhone(v.phone), v.email.trim().toLowerCase(), $('#f-marketing').checked].join('|');
     if (fp !== lastSubmitFingerprint) { submitKey = 'sub_' + uid(); lastSubmitFingerprint = fp; }
 
     sending = true; setBusy(leadBtn, true, 'Guardando tus datos…'); status(leadStatus, '');
     var tsInput = $('input[name="cf-turnstile-response"]');
     api('lead', Object.assign({
-      name: v.name, phone: v.phone, email: v.email, consent: true, marketing: $('#f-marketing').checked,
+      firstName: v.firstName, lastName: v.lastName, phone: v.phone, email: v.email, origin: 'reserva', consent: true, marketing: $('#f-marketing').checked,
       website: $('#f-website').value, elapsedMs: Date.now() - PAGE_LOADED_AT, submitKey: submitKey,
       pageUrl: landingUrl, utm: utm, consentVersion: CFG.CONSENT_VERSION,
       turnstileToken: tsInput ? tsInput.value : ''
@@ -215,116 +214,95 @@
     });
   });
 
-  // ── Paso 2: agenda ────────────────────────────────────────
+  // ── Paso 2: horarios recomendados ─────────────────────────
+  // El servidor devuelve los horarios libres más próximos (priorizando las próximas 24 h).
+  // Si ninguno le sirve, la persona escribe por WhatsApp.
   var todayYmd = localYmd(new Date());
-  var firstMonday = mondayOf(todayYmd);
-  var state = { week: firstMonday, slotsByDay: {}, day: null, slot: null, horizonEnd: null, autoAdvance: 0, idem: {}, booking: false };
-  var daysEl = $('#days'), slotsEl = $('#slots'), slotState = $('#slotState'), confirmBox = $('#confirmBox'), bookBtn = $('#bookBtn'), bookStatus = $('#bookStatus');
+  var state = { slots: [], slot: null, durationMin: 60, idem: {}, booking: false };
+  var slotsEl = $('#slots'), slotState = $('#slotState'), confirmBox = $('#confirmBox'), bookBtn = $('#bookBtn'), bookStatus = $('#bookStatus');
 
   function startScheduling() {
     goStep(2);
-    state.autoAdvance = 0;
-    loadWeek(state.week);
+    loadRecommendations();
     var b = $('#booking'); if (b.getBoundingClientRect().top < 0) b.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function renderSkeleton() {
-    daysEl.innerHTML = ''; slotsEl.innerHTML = '';
-    for (var i = 0; i < 9; i++) { var s = document.createElement('div'); s.className = 'skeleton'; slotsEl.appendChild(s); }
+    slotsEl.innerHTML = '';
+    for (var i = 0; i < 3; i++) { var s = document.createElement('div'); s.className = 'skeleton'; slotsEl.appendChild(s); }
     slotState.textContent = ''; confirmBox.hidden = true;
   }
 
-  function loadWeek(week) {
-    state.week = week; state.slot = null;
-    $('#weekLabel').textContent = weekLabel(week);
-    $('#prevWeek').disabled = week <= firstMonday;
+  function setWhatsApp(number) {
+    var n = String(number || CFG.WHATSAPP_NUMBER || '').replace(/\D/g, '');
+    $('#waHelp').hidden = !n;
+    if (!n) return;
+    var msg = 'Hola, quiero reservar una limpieza facial profunda y ninguno de los horarios de la web me sirve.' +
+      (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '');
+    $('#waLink').href = 'https://wa.me/' + n + '?text=' + encodeURIComponent(msg);
+  }
+
+  function loadRecommendations() {
+    state.slot = null;
     renderSkeleton();
-    return api('availability', { requestId: session.requestId, token: session.token, from: week, days: CFG.DAYS_PER_WEEK_VIEW || 5 })
+    return api('availability', { requestId: session.requestId, token: session.token })
       .then(function (res) {
         if (!res.ok) return availabilityError(res);
-        state.horizonEnd = res.horizonEnd || null;
-        $('#nextWeek').disabled = !!(state.horizonEnd && addDays(week, 7) > state.horizonEnd);
-        state.slotsByDay = {};
-        res.slots.forEach(function (s) { (state.slotsByDay[s.date] = state.slotsByDay[s.date] || []).push(s); });
-        if (res.slots.length) {
-          Track.send('vio_horarios', { dedupeKey: 'vio_horarios:' + session.requestId });
-          var keep = state.day && state.slotsByDay[state.day];
-          state.day = keep ? state.day : res.slots[0].date;
-          renderDays(); renderSlots();
-          if (state.autoAdvance > 0) slotState.textContent = 'Te mostramos la primera semana con horarios libres.';
-          return;
-        }
-        // Semana sin horarios: avanzar solo hasta 3 semanas para encontrar disponibilidad.
-        if (state.autoAdvance < 3 && !$('#nextWeek').disabled) { state.autoAdvance++; return loadWeek(addDays(week, 7)); }
-        state.day = null; renderDays(); slotsEl.innerHTML = '';
-        slotState.innerHTML = '';
-        slotState.appendChild(document.createTextNode('No hay horarios libres esta semana. '));
-        if (!$('#nextWeek').disabled) {
-          var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Ver semana siguiente';
-          b.onclick = function () { loadWeek(addDays(state.week, 7)); }; slotState.appendChild(b);
-        }
+        state.durationMin = res.durationMin || 60;
+        setWhatsApp(res.whatsapp);
+        renderRecommendations(res.slots || []);
+        if (state.slots.length) Track.send('vio_horarios', { dedupeKey: 'vio_horarios:' + session.requestId });
       });
   }
 
   function availabilityError(res) {
-    slotsEl.innerHTML = '';
+    slotsEl.innerHTML = ''; setWhatsApp('');
     if (res.code === 'invalid_token') { store.del('sessionStorage', 'cc_lead'); session = null; goStep(1); status(leadStatus, 'Tu sesión venció. Volvé a tocar «Continuar y ver horarios».', 'error'); return; }
-    if (res.code === 'calendar_not_configured' || res.code === 'not_configured') { slotState.textContent = 'Tus datos quedaron guardados, pero la agenda online todavía no está habilitada. Pronto vas a poder elegir tu horario acá.'; return; }
+    if (res.code === 'calendar_not_configured' || res.code === 'not_configured') { slotState.textContent = 'Tus datos quedaron guardados, pero la agenda online todavía no está habilitada. Te vamos a contactar para coordinar tu horario.'; return; }
     slotState.innerHTML = '';
     slotState.appendChild(document.createTextNode('No pudimos cargar los horarios. '));
     var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Reintentar';
-    b.onclick = function () { loadWeek(state.week); }; slotState.appendChild(b);
+    b.onclick = loadRecommendations; slotState.appendChild(b);
   }
 
-  function weekLabel(week) {
-    var end = addDays(week, 4);
-    var a = fmt(ymdToUtcNoon(week), { day: 'numeric', month: 'short' }), b = fmt(ymdToUtcNoon(end), { day: 'numeric', month: 'short' });
-    return (week === firstMonday ? 'Esta semana · ' : '') + a + ' al ' + b;
+  /** "Hoy", "Mañana" o "Jueves 6 de noviembre". */
+  function dayLabel(ymd) {
+    if (ymd === todayYmd) return 'Hoy';
+    if (ymd === addDays(todayYmd, 1)) return 'Mañana';
+    return longDate(ymd);
   }
 
-  function renderDays() {
-    daysEl.innerHTML = '';
-    for (var i = 0; i < (CFG.DAYS_PER_WEEK_VIEW || 5); i++) {
-      var ymd = addDays(state.week, i), list = state.slotsByDay[ymd] || [], d = ymdToUtcNoon(ymd);
-      var b = document.createElement('button');
-      b.type = 'button'; b.className = 'day' + (list.length ? '' : ' is-empty'); b.setAttribute('role', 'radio');
-      b.setAttribute('aria-checked', String(ymd === state.day)); b.tabIndex = ymd === state.day ? 0 : -1;
-      b.setAttribute('aria-label', longDate(ymd) + ', ' + (list.length ? list.length + (list.length === 1 ? ' horario' : ' horarios') : 'sin horarios'));
-      b.innerHTML = '<span class="dw">' + fmt(d, { weekday: 'short' }).replace('.', '') + '</span><span class="dn">' + fmt(d, { day: 'numeric' }) +
-        '</span><span class="dc">' + (list.length ? list.length + ' lib.' : (ymd < todayYmd ? 'pasado' : 'sin lugar')) + '</span>';
-      b.dataset.ymd = ymd;
-      b.addEventListener('click', function () { state.day = this.dataset.ymd; state.slot = null; renderDays(); renderSlots(); });
-      daysEl.appendChild(b);
-    }
-    rovingKeys(daysEl, '.day');
-  }
-
-  function renderSlots() {
+  function renderRecommendations(list) {
+    state.slots = list;
     slotsEl.innerHTML = ''; confirmBox.hidden = true; status(bookStatus, '');
-    var list = state.slotsByDay[state.day] || [];
-    slotState.textContent = list.length ? '' : 'No quedan horarios libres este día. Elegí otro día.';
+    slotState.textContent = list.length ? '' : 'Por ahora no hay horarios libres para reservar online.' + ($('#waHelp').hidden ? ' Tus datos quedaron guardados y te vamos a contactar.' : '');
     list.forEach(function (s, i) { slotsEl.appendChild(slotButton(s, i === 0)); });
-    rovingKeys(slotsEl, '.slot');
+    rovingKeys(slotsEl, '.rec');
   }
 
   function slotButton(s, focusable) {
     var b = document.createElement('button');
-    b.type = 'button'; b.className = 'slot'; b.setAttribute('role', 'radio');
+    b.type = 'button'; b.className = 'rec'; b.setAttribute('role', 'radio');
     var sel = state.slot && state.slot.start === s.start;
     b.setAttribute('aria-checked', String(!!sel)); b.tabIndex = (sel || (!state.slot && focusable)) ? 0 : -1;
-    b.textContent = s.time; b.dataset.start = s.start;
-    b.setAttribute('aria-label', longDate(s.date) + ', ' + s.time + ' a ' + endTime(s.start, 60) + ', hora de Montevideo');
+    b.dataset.start = s.start;
+    var txt = document.createElement('span');
+    var d = document.createElement('span'); d.className = 'rd'; d.textContent = dayLabel(s.date);
+    var t = document.createElement('span'); t.className = 'rt'; t.textContent = s.time + ' a ' + endTime(s.start, state.durationMin) + ' h';
+    txt.appendChild(d); txt.appendChild(t); b.appendChild(txt);
+    if (s.soon) { var badge = document.createElement('span'); badge.className = 'rb'; badge.textContent = 'Próximas 24 h'; b.appendChild(badge); }
+    b.setAttribute('aria-label', longDate(s.date) + ', ' + s.time + ' a ' + endTime(s.start, state.durationMin) + ', hora de Montevideo');
     b.addEventListener('click', function () { selectSlot(s); });
     return b;
   }
 
   function selectSlot(s) {
     state.slot = s;
-    $$('.slot').forEach(function (b) { b.setAttribute('aria-checked', String(b.dataset.start === s.start)); });
+    $$('.rec').forEach(function (b) { b.setAttribute('aria-checked', String(b.dataset.start === s.start)); });
     if (!state.idem[s.start]) state.idem[s.start] = 'idem_' + uid();
     Track.send('eligio_horario', { dedupeKey: 'eligio_horario:' + session.requestId + ':' + s.start });
     api('track', { event: 'eligio_horario', requestId: session.requestId, token: session.token, start: s.start });
-    $('#confirmWhen').textContent = longDate(s.date) + ' · ' + s.time + ' a ' + endTime(s.start, 60) + ' h';
+    $('#confirmWhen').textContent = longDate(s.date) + ' · ' + s.time + ' a ' + endTime(s.start, state.durationMin) + ' h';
     confirmBox.hidden = false; status(bookStatus, '');
     if (window.matchMedia('(max-width: 899px)').matches) confirmBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -337,9 +315,6 @@
       items.forEach(function (x) { x.tabIndex = -1; }); t.tabIndex = 0; t.focus();
     };
   }
-
-  $('#prevWeek').addEventListener('click', function () { if (state.week > firstMonday) { state.autoAdvance = 3; state.day = null; loadWeek(addDays(state.week, -7)); } });
-  $('#nextWeek').addEventListener('click', function () { state.autoAdvance = 3; state.day = null; loadWeek(addDays(state.week, 7)); });
 
   // ── Confirmación ──────────────────────────────────────────
   bookBtn.addEventListener('click', function () { if (!state.booking && state.slot) confirmBooking(state.slot, 0); });
@@ -365,28 +340,11 @@
   }
 
   function showAlternatives(alts) {
-    var lost = state.slot; state.slot = null; confirmBox.hidden = true;
-    slotState.innerHTML = '';
-    var p = document.createElement('p'); p.style.margin = '0 0 10px';
-    p.textContent = 'El horario de las ' + lost.time + ' se acaba de ocupar. ' + (alts.length ? 'Estas opciones siguen libres:' : 'Elegí otro horario.');
-    slotState.appendChild(p);
-    if (alts.length) {
-      var g = document.createElement('div'); g.className = 'slots';
-      alts.forEach(function (s) {
-        var b = slotButton(s, false); b.textContent = cap(fmt(new Date(s.start), { weekday: 'short' }).replace('.', '')) + ' ' + s.time;
-        b.addEventListener('click', function () { state.day = s.date; });
-        g.appendChild(b);
-      });
-      slotState.appendChild(g);
-    }
-    // refrescar la grilla de la semana con la disponibilidad real
-    var keepDay = state.day;
-    api('availability', { requestId: session.requestId, token: session.token, from: state.week, days: CFG.DAYS_PER_WEEK_VIEW || 5 }).then(function (res) {
-      if (!res.ok) return;
-      state.slotsByDay = {}; res.slots.forEach(function (s) { (state.slotsByDay[s.date] = state.slotsByDay[s.date] || []).push(s); });
-      state.day = keepDay; renderDays();
-      slotsEl.innerHTML = ''; (state.slotsByDay[state.day] || []).forEach(function (s, i) { slotsEl.appendChild(slotButton(s, i === 0)); });
-    });
+    var lost = state.slot;
+    renderRecommendations(alts);
+    var p = document.createElement('p'); p.style.margin = '0';
+    p.textContent = 'El horario de las ' + lost.time + ' se acaba de ocupar. ' + (alts.length ? 'Estos siguen libres:' : 'Por ahora no quedan otros horarios online.');
+    slotState.innerHTML = ''; slotState.appendChild(p);
     slotState.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
@@ -617,5 +575,5 @@
   Track.init();
   var prevBooking = store.get('sessionStorage', 'cc_booking');
   if (session && prevBooking) showDone(prevBooking, { restore: true });
-  else if (session) { goStep(2); state.autoAdvance = 0; loadWeek(state.week); }
+  else if (session) { goStep(2); loadRecommendations(); }
 })();

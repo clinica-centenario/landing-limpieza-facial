@@ -1,5 +1,6 @@
 /**
- * Cálculo de disponibilidad: cruce profesional × consultorios.
+ * Cálculo de disponibilidad: franjas de la pestaña Horarios × consultorio libre
+ * (× profesional, si se configura su calendario).
  * Lógica pura (sin servicios de Google) salvo fetchBusy_(), para poder testearla.
  */
 
@@ -46,6 +47,14 @@ function pad2_(n) { return (n < 10 ? '0' : '') + n; }
 function ymd_(p) { return p.y + '-' + pad2_(p.m) + '-' + pad2_(p.d); }
 function hm_(p) { return pad2_(p.hh) + ':' + pad2_(p.mm); }
 function parseHm_(s) { var a = String(s).split(':'); return Number(a[0]) * 60 + Number(a[1] || 0); }
+/** "9", "9:00", "09:00:00", "9.30", "14 hs" → minutos desde 00:00, o null. */
+function parseSheetTime_(v) {
+  var m = /^\s*(\d{1,2})(?:[:.](\d{2}))?(?::\d{2})?\s*(?:h|hs)?\s*$/i.exec(String(v == null ? '' : v));
+  if (!m) return null;
+  var h = Number(m[1]), mi = Number(m[2] || 0);
+  if (h > 24 || mi > 59 || (h === 24 && mi > 0)) return null;
+  return h * 60 + mi;
+}
 function parseYmd_(s) {
   var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return null;
@@ -71,34 +80,41 @@ function isFree_(busyList, start, end) {
 
 /**
  * Lista de inicios candidatos (antes de cruzar calendarios) para un rango de fechas locales.
+ * Cada franja de cfg.WEEKLY admite inicios desde "Desde" hasta que la sesión termine en "Hasta".
  * @return [{start:Date, end:Date, date:'YYYY-MM-DD', time:'HH:MM'}]
  */
 function candidateSlots_(cfg, fromYmd, days, now) {
   var out = [];
-  var open = parseHm_(cfg.OPEN_TIME), close = parseHm_(cfg.CLOSE_TIME), last = parseHm_(cfg.LAST_START_TIME);
   var dur = cfg.DURATION_MIN, step = cfg.SLOT_STEP_MIN;
   var earliest = now.getTime() + cfg.MIN_NOTICE_HOURS * 3600000;
   var horizon = now.getTime() + cfg.HORIZON_DAYS * 86400000;
+  var weekly = cfg.WEEKLY || {};
   for (var i = 0; i < days; i++) {
     var day = addDaysYmd_(fromYmd, i);
     var key = ymd_(day);
     var noon = zonedToDate_(day.y, day.m, day.d, 12, 0, cfg.TIMEZONE);
     var dow = localParts_(noon, cfg.TIMEZONE).isoDow;
-    if (cfg.WORKING_DAY_LIST.indexOf(dow) < 0) continue;
+    var windows = weekly[dow] || [];
+    if (!windows.length) continue;
     if (cfg.CLOSED_DATE_LIST.indexOf(key) >= 0) continue;
-    for (var t = open; t <= last && t + dur <= close; t += step) {
+    var seen = {}, times = [];
+    windows.forEach(function (w) {
+      for (var t = w.from; t + dur <= w.to; t += step) if (!seen[t]) { seen[t] = true; times.push(t); }
+    });
+    times.sort(function (a, b) { return a - b; });
+    times.forEach(function (t) {
       var start = zonedToDate_(day.y, day.m, day.d, Math.floor(t / 60), t % 60, cfg.TIMEZONE);
       var end = new Date(start.getTime() + dur * 60000);
-      if (start.getTime() < earliest || start.getTime() < now.getTime()) continue;
-      if (start.getTime() > horizon) continue;
+      if (start.getTime() < earliest || start.getTime() < now.getTime()) return;
+      if (start.getTime() > horizon) return;
       out.push({ start: start, end: end, date: key, time: pad2_(Math.floor(t / 60)) + ':' + pad2_(t % 60) });
-    }
+    });
   }
   return out;
 }
 
 /**
- * Cruce: primero la profesional, después los consultorios elegibles.
+ * Cruce: profesional (solo si hay calendario configurado) y después los consultorios elegibles.
  * busyMap: { calendarId: [{start:Date,end:Date}] , errors: {calendarId: true} }
  * Un calendario con error se considera NO disponible (falla cerrada).
  * @return [{start, end, date, time, rooms:[calendarId…]}]
@@ -106,18 +122,37 @@ function candidateSlots_(cfg, fromYmd, days, now) {
 function crossAvailability_(cfg, candidates, busyMap) {
   var pro = cfg.PRO_CALENDAR_ID;
   var errors = busyMap.errors || {};
-  if (!pro || errors[pro]) return [];
+  if (pro && errors[pro]) return [];
   var before = cfg.BUFFER_BEFORE_MIN * 60000, after = cfg.BUFFER_AFTER_MIN * 60000;
   var out = [];
   candidates.forEach(function (c) {
     var s = new Date(c.start.getTime() - before), e = new Date(c.end.getTime() + after);
-    if (!isFree_(busyMap[pro] || [], s, e)) return;           // 1) profesional
+    if (pro && !isFree_(busyMap[pro] || [], s, e)) return;    // 1) profesional
     var rooms = cfg.ROOM_CALENDAR_LIST.filter(function (r) {    // 2) consultorios
       return !errors[r] && isFree_(busyMap[r] || [], s, e);
     });
     if (rooms.length) out.push({ start: c.start, end: c.end, date: c.date, time: c.time, rooms: rooms });
   });
   return out;
+}
+
+/**
+ * Elige los horarios a ofrecer: los más próximos, sin superponerse entre sí,
+ * empezando por los que caen dentro de RECOMMEND_WITHIN_HOURS.
+ * Como la lista viene ordenada por inicio, los de las próximas 24 h quedan primero.
+ */
+function pickRecommended_(cfg, slots, now, excludeIso) {
+  var soonLimit = now.getTime() + cfg.RECOMMEND_WITHIN_HOURS * 3600000;
+  var picked = [];
+  for (var i = 0; i < slots.length && picked.length < cfg.RECOMMEND_COUNT; i++) {
+    var s = slots[i];
+    if (excludeIso && s.start.toISOString() === excludeIso) continue;
+    var clash = picked.some(function (p) { return overlaps_(p.start, p.end, s.start, s.end); });
+    if (clash) continue;
+    s.soon = s.start.getTime() <= soonLimit;
+    picked.push(s);
+  }
+  return picked;
 }
 
 // ── Lectura de Google Calendar ──────────────────────────────
@@ -149,8 +184,29 @@ function computeAvailability_(cfg, fromYmd, days, now) {
   var pad = Math.max(cfg.BUFFER_BEFORE_MIN, cfg.BUFFER_AFTER_MIN) * 60000;
   var tMin = new Date(cands[0].start.getTime() - pad);
   var tMax = new Date(cands[cands.length - 1].end.getTime() + pad);
-  var ids = [cfg.PRO_CALENDAR_ID].concat(cfg.ROOM_CALENDAR_LIST);
-  var busy = fetchBusy_(ids, tMin, tMax, cfg.TIMEZONE);
+  var busy = fetchBusy_(calendarIds_(cfg), tMin, tMax, cfg.TIMEZONE);
   var anyError = Object.keys(busy.errors).length > 0;
   return { slots: crossAvailability_(cfg, cands, busy), calendarErrors: anyError };
+}
+
+/** Calendarios a consultar: profesional (si está configurado) + consultorios. */
+function calendarIds_(cfg) { return [cfg.PRO_CALENDAR_ID].concat(cfg.ROOM_CALENDAR_LIST).filter(Boolean); }
+
+/**
+ * Recomendación: busca desde hoy en tramos de MAX_DAYS_PER_QUERY días hasta juntar
+ * RECOMMEND_COUNT horarios o llegar al horizonte de reserva.
+ */
+function recommendSlots_(cfg, now, excludeIso) {
+  var lp = localParts_(now, cfg.TIMEZONE);
+  var from = { y: lp.y, m: lp.m, d: lp.d };
+  var chunk = Math.max(1, cfg.MAX_DAYS_PER_QUERY);
+  var found = [], anyError = false;
+  for (var offset = 0; offset <= cfg.HORIZON_DAYS; offset += chunk) {
+    var r = computeAvailability_(cfg, addDaysYmd_(from, offset), chunk, now);
+    anyError = anyError || r.calendarErrors;
+    found = found.concat(r.slots);
+    var picked = pickRecommended_(cfg, found, now, excludeIso);
+    if (picked.length >= cfg.RECOMMEND_COUNT) return { slots: picked, calendarErrors: anyError };
+  }
+  return { slots: pickRecommended_(cfg, found, now, excludeIso), calendarErrors: anyError };
 }
