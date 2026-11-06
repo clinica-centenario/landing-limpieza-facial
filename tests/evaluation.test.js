@@ -130,7 +130,7 @@ test('sensibilidad: característica declarada, no un tipo de piel', () => {
   assert.ok(r.declared.some(d => /^Sensibilidad declarada/.test(d.text)));
   assert.notEqual(r.tendency.key, 'sensible');
   assert.ok(r.orientations.some(o => o.id === 'ORI-TOLERANCIA'));
-  assert.match(r.summary.join(' '), /con sensibilidad a algunos productos/);
+  assert.equal(r.skinType.sensitive, true);
 });
 
 test('cuestionario incompleto: lo no respondido queda vacío, nunca "no"; nada viene marcado', () => {
@@ -181,8 +181,10 @@ test('resumen de una o dos frases, sin repetir tarjetas ni advertencias; qué tr
   const a = EV.buildReport(FULL, photoOf(LOCATED, GOOD, ZONES)), b = EV.buildReport({ ...FULL, brillo_donde: 'nose', tirantez: 'nose', descamacion: 'nose', objetivo: 'confort' }, photoOf(CLEAN));
   assert.ok(a.summary.length >= 1 && a.summary.length <= 2);
   assert.match(a.summary[0], /coincide con lo que buscás: menos brillo/);
-  assert.match(a.summary[1], /tendería a ser mixta/);
-  assert.equal(b.summary.length, 1, 'sin datos para la tendencia, no se menciona');
+  assert.deepEqual(a.skinType, { key: 'mixta', label: 'Mixta', sensitive: false, partial: false }, 'tipo de piel estimado en su propia línea');
+  assert.ok(!/mixta/.test(a.summary.join(' ')), 'no se repite en el resumen');
+  assert.equal(b.skinType, null, 'sin datos suficientes, no se estima');
+  assert.equal(b.summary.length, 1);
   assert.ok(!/cosmetóloga|define en persona|diagnóstico/.test(a.summary.concat(b.summary).join(' ')));
   const words = a.summary.join(' ').split(/\s+/).length; assert.ok(words <= 30, 'resumen corto: ' + words);
   assert.ok(a.work.length <= 3 && a.work.length > 0);

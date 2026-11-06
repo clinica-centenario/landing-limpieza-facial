@@ -1398,7 +1398,7 @@
     }
 
     function waSummary(r) {
-      return 'Hola, hice la evaluación cosmética en la web. ' + r.summary.join(' ') +
+      return 'Hola, hice la evaluación cosmética en la web. ' + (r.skinType ? 'Tipo de piel estimado: ' + r.skinType.label.toLowerCase() + (r.skinType.sensitive ? ', con sensibilidad' : '') + '. ' : '') + r.summary.join(' ') +
         (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '') + ' Quisiera consultar.';
     }
     function numChip(o) { var s = el('span', 'ai-num', String(o.n)); s.style.background = EV.CAT[o.category].color; s.setAttribute('aria-hidden', 'true'); return s; }
@@ -1413,6 +1413,13 @@
       var ST = EV.ST, seen = r.observations.filter(function (o) { return o.status === ST.SEEN; });
       var byN = {}; seen.forEach(function (o) { byN[o.n] = o; });
       out.appendChild(el('h3', 'ai-title', 'Tu piel, de cerca'));
+      if (r.skinType) {
+        var stp = el('p', 'ai-skintype');
+        stp.appendChild(document.createTextNode('Tipo de piel estimado: '));
+        stp.appendChild(el('strong', null, r.skinType.label + (r.skinType.sensitive ? ', con sensibilidad' : '')));
+        stp.appendChild(el('span', 'ai-skintype-src', r.skinType.partial ? 'orientación parcial, por tus respuestas' : 'por tus respuestas'));
+        out.appendChild(stp);
+      }
 
       // B. Foto con marcas interactivas
       if (r.photo === 'analizada' && photo) {
@@ -1502,7 +1509,6 @@
 
       // Información secundaria
       var ans = more('Ver mis respuestas'), ula = el('ul', 'ai-list');
-      if (r.tendency.key) ula.appendChild(el('li', null, 'Tendencia orientativa por tus respuestas: ' + EV.TENDENCY_LABEL[r.tendency.key] + '.'));
       r.declared.forEach(function (x) { ula.appendChild(el('li', null, x.text)); });
       if (!ula.children.length) ula.appendChild(el('li', null, 'No hay respuestas para mostrar.'));
       ans.appendChild(ula); out.appendChild(ans);

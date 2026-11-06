@@ -201,6 +201,7 @@ with sync_playwright() as p:
     check('Reservar evaluación y limpieza facial' in txt, 'botón de reserva con el texto del servicio')
     words = visible_words(pg); print('   palabras visibles:', words); check(words <= 140, f'resultado breve: {words} palabras visibles')
     print("   resumen:", pg.inner_text('.ai-summary'))
+    check(pg.is_visible('.ai-skintype') and 'Tipo de piel estimado: Mixta' in ' '.join(pg.inner_text('.ai-skintype').split()), 'muestra el tipo de piel estimado: ' + pg.inner_text('.ai-skintype').replace('\n', ' '))
     n_badges = pg.eval_on_selector_all('.ai-chip', 'e=>e.length')
     print(f"   marcas: {n_badges} · círculos: {pg.eval_on_selector_all('.ai-badge', 'e=>e.length')} · anillos: {pg.eval_on_selector_all('.ai-ring', 'e=>e.length')}")
     check(not pg.is_visible('.ai-detail'), 'al inicio solo etiquetas breves: ninguna explicación abierta')

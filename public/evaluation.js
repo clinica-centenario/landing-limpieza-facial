@@ -392,6 +392,13 @@
     return r;
   }
   var TENDENCY_LABEL = { grasa: 'grasa', mixta: 'mixta', seca: 'seca', normal: 'equilibrada (ni grasa ni seca)' };
+  // Lo que se muestra arriba del resultado: "Tipo de piel estimado". Sale de las respuestas, no de la foto.
+  var SKIN_LABEL = { grasa: 'Grasa', mixta: 'Mixta', seca: 'Seca', normal: 'Normal' };
+  function skinTypeOf(t, a) {
+    if (!t.key) return null;
+    var sens = a.reactividad === 'seguido' || a.reactividad === 'aveces';
+    return { key: t.key, label: SKIN_LABEL[t.key], sensitive: sens, partial: t.certainty === 'parcial' };
+  }
 
   function declaredOf(a) {
     var d = [], add = function (id, text) { d.push({ id: id, source: 'cuestionario', text: text }); };
@@ -499,9 +506,8 @@
       s.push(match ? 'Lo marcado en tu foto coincide con lo que buscás: ' + label('objetivo', a.objetivo).toLowerCase() + '.'
         : 'Marcamos en tu foto lo que conviene mirar de cerca en la consulta.');
     } else s.push('No encontramos detalles destacados en las zonas que pudimos evaluar.');
-    var t = r.tendency, sens = a.reactividad === 'seguido' || a.reactividad === 'aveces';
-    if (t.key) s.push('Por lo que contaste, tu piel tendería a ser ' + TENDENCY_LABEL[t.key] + (sens ? ', con sensibilidad a algunos productos' : '') + '.');
-    else if (sens) s.push('Contaste sensibilidad a algunos productos.');
+    // El tipo de piel estimado va en su propia línea (skinType); acá solo se menciona la sensibilidad si no hay tipo.
+    if (!r.skinType && (a.reactividad === 'seguido' || a.reactividad === 'aveces')) s.push('Contaste sensibilidad a algunos productos.');
     return s;
   }
 
@@ -517,6 +523,7 @@
     obs.forEach(function (o) { if (o.status === ST.SEEN) o.n = ++seenN; o.id = 'OBS-' + o.category; });
     var r = { version: VERSION, photo: photo ? 'analizada' : 'sin_foto', tendency: tendencyOf(a), observations: obs,
       declared: declaredOf(a), preReview: preReviewOf(a), disclaimer: DISCLAIMER };
+    r.skinType = skinTypeOf(r.tendency, a);
     r.capture = captureOf(obs, !!photo);
     r.orientations = orientationsOf(a, obs);
     r.work = r.orientations.slice(0, 3).map(function (o) { return { id: o.id, text: o.short, marks: o.marks }; });
@@ -567,7 +574,7 @@
   var api = { VERSION: VERSION, PRO: PRO, DISCLAIMER: DISCLAIMER, ST: ST, NA_KIND: NA_KIND, CATEGORIES: CATEGORIES, CAT: CAT, ZONE_LABEL: ZONE_LABEL,
     SKIN_RULES: SKIN_RULES, NEEDS: NEEDS, QUIZ: QUIZ, quizFor: quizFor, visibleItems: visibleItems, missingIn: missingIn, cleanAnswers: cleanAnswers,
     observePhoto: observePhoto, applyPhotoContext: applyPhotoContext, buildReport: buildReport, validateReport: validateReport,
-    compactReport: compactReport, TENDENCY_LABEL: TENDENCY_LABEL, label: label };
+    compactReport: compactReport, TENDENCY_LABEL: TENDENCY_LABEL, SKIN_LABEL: SKIN_LABEL, label: label };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CCEval = api;
 })(typeof window !== 'undefined' ? window : this);

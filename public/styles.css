@@ -394,6 +394,9 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .ai-sec-head h3 { font-size: 21px; margin-bottom: 8px; }
 .ai-summary { font-size: 16px; color: var(--ink); margin-bottom: 6px; }
 .ai-title { font-size: 22px; margin: 0 0 12px; }
+.ai-skintype { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; margin: -4px 0 12px; font-size: 16px; color: var(--ink); }
+.ai-skintype strong { color: var(--green-800); }
+.ai-skintype-src { font-size: 13px; color: var(--muted); }
 .ai-photo { margin: 0; }
 .ai-photo-frame { position: relative; max-width: 480px; margin: 0 auto; }
 .ai-photo-svg { stroke: none; stroke-width: 0; fill: #000; display: block; width: 100%; height: auto; border-radius: var(--radius); background: #1f2418; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: zoom-in; }
