@@ -33,7 +33,7 @@ test('guarda el resumen en texto, sin la foto, vinculado a la solicitud', () => 
   const row = rows(env)[0];
   assert.equal(row['ID solicitud'], env.lead.requestId);
   assert.equal(row['Tipo de piel (orientativo)'], 'Tendencia mixta (moderada) [cuestionario]');
-  assert.match(row['Observaciones de la foto'], /brillo: Se observa \(Reflejos de luz concentrados en frente y nariz\.\)/);
+  assert.match(row['Observaciones de la foto'], /brillo: Se observa \(Frente y nariz: En la foto se aprecia más brillo en estas zonas\.\)/);
   assert.match(row['Observaciones de la foto'], /poros: No evaluable/);
   assert.match(row['Necesidades referidas'], /Sensibilidad declarada/);
   assert.match(row['Beneficios posibles'], /comedones aptos para extracción/);
@@ -81,7 +81,7 @@ test('nada del contenido va a los logs ni a los eventos', () => {
   const env = env0();
   env.save();
   const logs = env.state.logs.join(' ') + JSON.stringify(env.state.sheets['Eventos'] || []);
-  assert.ok(!/Reflejos|Sensibilidad|comedones|mixta/.test(logs), logs);
+  assert.ok(!/brillo en estas|Sensibilidad|comedones|mixta/.test(logs), logs);
 });
 
 test('la misma solicitud reserva sin volver a cargar datos y el resumen queda "Reservó = Sí"', () => {

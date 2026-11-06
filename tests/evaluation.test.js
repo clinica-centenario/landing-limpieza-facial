@@ -14,46 +14,88 @@ const FULL = { en_cara: 'nada', brillo_donde: 'zona_t', brillo_cuando: 'tarde', 
 const byCat = (obs) => Object.fromEntries(obs.map(o => [o.category, o]));
 const photoOf = (m, q = GOOD, r = REGIONS) => ({ observations: EV.observePhoto(m, q, r) });
 
-test('cada categoría tiene un estado; poros, puntos claros y descamación no son evaluables con este método', () => {
-  const o = byCat(EV.observePhoto(CLEAN, GOOD, REGIONS));
+// Zonas separadas, como en una cara: frente arriba, nariz al centro, mejillas a los lados.
+const SQR = (x, y, w = 100) => [[x, y], [x + w, y], [x + w, y + w], [x, y + w]];
+const ZONES = { frente: SQR(100, 0), nariz: SQR(150, 120), mejilla_der: SQR(0, 200), mejilla_izq: SQR(300, 200) };
+const LOCATED = { ...BUSY, shine: { frente: { frac: 0.06, x: 150, y: 40, spread: 6 }, nariz: { frac: 0.002, x: 200, y: 170, spread: 3 } },
+  cheeks: { mejilla_der: { texture: 9, redDiff: 0.06, toneCv: 0.05 }, mejilla_izq: { texture: 9, redDiff: 0.01, toneCv: 0.1 } },
+  darkSpots: [{ x: 190, y: 170 }, { x: 205, y: 178 }, { x: 198, y: 186 }], lightSpots: [{ x: 40, y: 240 }, { x: 52, y: 252 }, { x: 46, y: 236 }] };
+
+test('cada categoría tiene un estado; "no evaluable" distingue foto, contexto y detector', () => {
+  const o = byCat(EV.observePhoto({ ...CLEAN, lightSpots: [] }, GOOD, REGIONS));
   assert.deepEqual(Object.keys(o), EV.CATEGORIES.map(c => c.key));
-  for (const k of ['poros', 'puntos_claros', 'descamacion']) { assert.equal(o[k].status, 'no_evaluable'); assert.ok(o[k].reason); }
-  for (const k of ['brillo', 'textura', 'puntos_oscuros', 'enrojecimiento', 'tono']) assert.equal(o[k].status, 'no_observado');
+  for (const k of ['poros', 'descamacion']) { assert.equal(o[k].status, 'no_evaluable'); assert.equal(o[k].naKind, 'detector'); assert.match(o[k].reason, /análisis automático todavía no mide/); }
+  for (const k of ['brillo', 'textura', 'puntos_oscuros', 'puntos_claros', 'enrojecimiento', 'tono']) assert.equal(o[k].status, 'no_observado', k);
   assert.ok(Object.values(o).every(x => x.geometry === null), 'sin hallazgos no hay marcas');
+  const all = JSON.stringify(o);
+  assert.ok(!/más chicos que el detalle|foto de celular no muestra|solo se identifican|se identifican en persona/.test(all), 'sin afirmaciones universales sobre las fotos');
 });
 
-test('imagen sin hallazgos: el informe no inventa observaciones y aclara que "no se observa" no es "no existe"', () => {
-  const r = EV.buildReport(FULL, photoOf(CLEAN));
+test('imagen sin hallazgos: no inventa observaciones ni afirma que la piel esté bien', () => {
+  const r = EV.buildReport(FULL, photoOf({ ...CLEAN, lightSpots: [] }));
   assert.equal(r.observations.filter(o => o.status === 'observado').length, 0);
-  assert.match(r.summary[1], /no se observaron diferencias claras/);
+  assert.equal(r.summary[0], 'No encontramos detalles destacados en las zonas que pudimos evaluar.');
+  assert.equal(r.capture, null, 'el límite del detector no pide repetir la foto');
   assert.ok(!r.orientations.some(o => o.id === 'ORI-COMEDONES'));
 });
 
-test('observado: zona, descripción, limitación y geometría válida; sin conteos ni porcentajes', () => {
-  const r = EV.buildReport(FULL, photoOf(BUSY));
-  const seen = r.observations.filter(o => o.status === 'observado');
-  assert.deepEqual(seen.map(o => o.category), ['brillo', 'textura', 'puntos_oscuros', 'enrojecimiento', 'tono']);
-  assert.deepEqual(seen.map(o => o.n), [1, 2, 3, 4, 5], 'numeradas una vez cada una');
-  seen.forEach(o => { assert.ok(o.zone && o.description && o.limitation && o.source === 'foto'); assert.equal(o.geometry.type, 'region'); });
+test('marcas sobre la evidencia: reflejos, puntitos y la mejilla que supera el umbral', () => {
+  const r = EV.buildReport(FULL, photoOf(LOCATED, GOOD, ZONES));
+  const o = byCat(r.observations);
+  assert.deepEqual(r.observations.filter(x => x.status === 'observado').map(x => x.n), [1, 2, 3, 4, 5, 6], 'numeradas una vez cada una');
+  const b = o.brillo.geometry.marks;
+  assert.deepEqual(b.map(m => [m.kind, m.zone, m.x, m.y]), [['punto', 'frente', 150, 40]], 'el brillo se marca donde están los reflejos, no en la nariz sin reflejos');
+  assert.equal(o.brillo.zone, 'frente');
+  const d = o.puntos_oscuros.geometry.marks[0];
+  assert.equal(d.kind, 'punto'); assert.ok(Math.abs(d.x - 197.7) < 1 && Math.abs(d.y - 178) < 1, 'círculo centrado en los puntitos detectados');
+  assert.ok(d.r >= 12 && d.r < 50);
+  assert.deepEqual(o.puntos_claros.geometry.marks.map(m => [m.kind, m.zone]), [['punto', 'mejilla_der']]);
+  assert.deepEqual(o.enrojecimiento.geometry.marks.map(m => [m.kind, m.zone, m.x, m.y]), [['zona', 'mejilla_der', 50, 250]], 'extendido: número en el centro de la zona medida');
+  assert.equal(o.enrojecimiento.zone, 'mejilla derecha');
+  assert.deepEqual(o.tono.geometry.marks.map(m => m.zone), ['mejilla_izq']);
+  assert.equal(o.textura.zone, 'ambas mejillas');
+  for (const x of r.observations.filter(x => x.status === 'observado')) assert.ok(x.description && x.meaning && x.consult, x.category);
   assert.ok(!/\(\d+\)|%/.test(JSON.stringify(r)), 'sin conteos ni porcentajes');
   assert.deepEqual(EV.validateReport(r), []);
 });
 
-test('zonas tapadas, luz de costado o poco detalle: "no evaluable" con el motivo, nunca un hallazgo', () => {
+test('evidencia muy repartida: se señala la zona, sin aparentar delimitar una lesión', () => {
+  const spread = { ...LOCATED, darkSpots: [{ x: 150, y: 120 }, { x: 250, y: 220 }, { x: 150, y: 220 }, { x: 250, y: 120 }] };
+  const ms = byCat(EV.observePhoto(spread, GOOD, ZONES)).puntos_oscuros.geometry.marks;
+  assert.equal(ms.length, 1); assert.equal(ms[0].kind, 'zona'); assert.equal(ms[0].r, 0);
+  // Dos grupos separados más un punto suelto: un círculo por grupo, ninguno para el suelto.
+  const two = { ...LOCATED, darkSpots: [{ x: 160, y: 130 }, { x: 166, y: 134 }, { x: 240, y: 210 }, { x: 236, y: 214 }, { x: 200, y: 175 }] };
+  const g = byCat(EV.observePhoto(two, GOOD, ZONES)).puntos_oscuros.geometry.marks;
+  assert.equal(g.length, 2); assert.ok(g.every(m => m.kind === 'punto'));
+});
+
+test('sin ubicación medida, la marca va al centro de la zona medida; nunca a un lugar inventado', () => {
+  const o = byCat(EV.observePhoto(BUSY, GOOD, ZONES));
+  assert.ok(o.brillo.geometry.marks.every(m => m.kind === 'zona' && ['frente', 'nariz'].includes(m.zone)));
+  assert.equal(o.puntos_claros.status, 'no_evaluable', 'sin medición de puntitos claros no se afirma nada');
+});
+
+test('foto que no alcanza: "no evaluable" con el motivo real y un consejo acorde', () => {
   const o = byCat(EV.observePhoto(BUSY, { pxPerMm: 2, sideLight: true, occluded: { nariz: true, mejilla_der: true, mejilla_izq: true } }, REGIONS));
-  assert.equal(o.brillo.status, 'no_evaluable'); assert.match(o.brillo.reason, /luz/);
-  assert.equal(o.textura.status, 'no_evaluable');
+  assert.equal(o.brillo.status, 'no_evaluable'); assert.equal(o.brillo.fix, 'luz_lateral');
+  assert.equal(o.textura.fix, 'tapado');
   assert.equal(o.puntos_oscuros.status, 'no_evaluable'); assert.match(o.puntos_oscuros.reason, /nariz/);
-  assert.equal(o.tono.status, 'no_evaluable');
   const half = byCat(EV.observePhoto(BUSY, { ...GOOD, occluded: { mejilla_der: true } }, REGIONS));
-  assert.equal(half.tono.geometry.polygons.length, 1, 'solo se marca la mejilla que se ve');
+  assert.deepEqual(half.tono.geometry.marks.map(m => m.zone), ['mejilla_izq'], 'solo se marca la mejilla que se ve');
   const low = byCat(EV.observePhoto(BUSY, { ...GOOD, pxPerMm: 2.7 }, REGIONS));
-  assert.equal(low.textura.status, 'observado'); assert.equal(low.puntos_oscuros.status, 'no_evaluable', 'los puntitos necesitan más detalle que la textura');
+  assert.equal(low.textura.status, 'observado'); assert.equal(low.puntos_oscuros.status, 'no_evaluable'); assert.equal(low.puntos_oscuros.fix, 'detalle');
+  // Poco detalle y nada observado en lo demás → pedir acercar la cámara; luz despareja → no pedir acercarse.
+  const tiny = EV.buildReport(FULL, photoOf({ ...CLEAN, lightSpots: [] }, { pxPerMm: 2, occluded: { frente: true } }));
+  assert.equal(tiny.capture.blocking, true); assert.match(tiny.summary[0], /acercá un poco más la cámara/);
+  const lateral = EV.buildReport(FULL, photoOf(CLEAN, { pxPerMm: 4, sideLight: true, occluded: {} }));
+  assert.equal(lateral.capture.fix, 'luz_lateral'); assert.ok(!/acerc/.test(lateral.summary[0]), lateral.summary[0]);
+  const some = EV.buildReport(FULL, photoOf(BUSY, { ...GOOD, pxPerMm: 2.7 }));
+  assert.equal(some.capture.blocking, false, 'con observaciones, el consejo es un dato aparte'); assert.match(some.capture.text, /acercando/);
 });
 
 test('maquillaje, crema o filtro declarados solo restan evaluabilidad', () => {
   const mk = byCat(EV.buildReport({ ...FULL, en_cara: 'maquillaje' }, photoOf(BUSY)).observations);
-  assert.ok(['brillo', 'textura', 'puntos_oscuros', 'enrojecimiento', 'tono'].every(k => mk[k].status === 'no_evaluable' && !mk[k].geometry));
+  assert.ok(['brillo', 'textura', 'puntos_oscuros', 'enrojecimiento', 'tono'].every(k => mk[k].status === 'no_evaluable' && mk[k].naKind === 'contexto' && !mk[k].geometry));
   const cr = byCat(EV.buildReport({ ...FULL, en_cara: 'crema' }, photoOf(BUSY)).observations);
   assert.equal(cr.brillo.status, 'no_evaluable'); assert.equal(cr.tono.status, 'observado');
   const fl = byCat(EV.buildReport({ ...FULL, filtro: 'si' }, photoOf(BUSY)).observations);
@@ -65,7 +107,7 @@ test('maquillaje, crema o filtro declarados solo restan evaluabilidad', () => {
 test('el cuestionario nunca genera marcas: sin foto no hay observaciones aunque cuente brillo o puntitos', () => {
   const r = EV.buildReport({ ...FULL, brillo_donde: 'toda', objetivo: 'puntos' }, null);
   assert.equal(r.photo, 'sin_foto'); assert.equal(r.observations.length, 0);
-  assert.match(r.summary[1], /No sumaste foto/);
+  assert.match(r.summary[0], /Sin foto/);
   const pn = r.orientations.find(o => o.id === 'ORI-COMEDONES');
   assert.deepEqual(pn.because, ['Elegiste despejar puntitos oscuros o poros.'], 'el motivo cita solo la respuesta');
 });
@@ -88,7 +130,7 @@ test('sensibilidad: característica declarada, no un tipo de piel', () => {
   assert.ok(r.declared.some(d => /^Sensibilidad declarada/.test(d.text)));
   assert.notEqual(r.tendency.key, 'sensible');
   assert.ok(r.orientations.some(o => o.id === 'ORI-TOLERANCIA'));
-  assert.match(r.summary[0], /con sensibilidad a algunos productos/);
+  assert.match(r.summary.join(' '), /con sensibilidad a algunos productos/);
 });
 
 test('cuestionario incompleto: lo no respondido queda vacío, nunca "no"; nada viene marcado', () => {
@@ -117,7 +159,7 @@ test('revisión previa: cada respuesta por separado; lesión que sangra o cambia
   assert.equal(s[0].kind, 'medica'); assert.match(s[0].text, /sangra/); assert.ok(!/cambió/.test(s[0].text));
   assert.match(s[0].text, /consultá con un médico o dermatólogo/); assert.match(s[0].text, /no es una solución/);
   const r = EV.buildReport({ ...FULL, cambio: 'si' }, null);
-  assert.match(r.summary[2], /consulta médica/);
+  assert.ok(r.summary.length <= 2 && !/médic/.test(r.summary.join(' ')), 'la alerta va aparte, a la vista: no se repite en el resumen');
   assert.equal(EV.buildReport(FULL, null).preReview.length, 0, 'si todo es "No", no se muestra');
 });
 
@@ -135,12 +177,17 @@ test('orientaciones: cada una con su motivo concreto, sin asignar técnicas ni p
   assert.deepEqual(calm.orientations.map(o => o.id), ['ORI-CUIDADO'], 'no se recomiendan todas las técnicas a todos');
 });
 
-test('resumen personalizado de 2 o 3 frases; distinto según los datos', () => {
-  const a = EV.buildReport(FULL, photoOf(BUSY)), b = EV.buildReport({ ...FULL, brillo_donde: 'poco', objetivo: 'confort', tirantez: 'siempre' }, photoOf(CLEAN));
-  assert.ok(a.summary.length >= 2 && a.summary.length <= 3);
-  assert.notDeepEqual(a.summary, b.summary);
-  assert.match(a.summary[1], /reflejos de luz en frente y nariz/);
-  assert.match(b.summary[2], /confort/);
+test('resumen de una o dos frases, sin repetir tarjetas ni advertencias; qué trabajar: hasta tres puntos ligados', () => {
+  const a = EV.buildReport(FULL, photoOf(LOCATED, GOOD, ZONES)), b = EV.buildReport({ ...FULL, brillo_donde: 'nose', tirantez: 'nose', descamacion: 'nose', objetivo: 'confort' }, photoOf(CLEAN));
+  assert.ok(a.summary.length >= 1 && a.summary.length <= 2);
+  assert.match(a.summary[0], /coincide con lo que buscás: menos brillo/);
+  assert.match(a.summary[1], /tendería a ser mixta/);
+  assert.equal(b.summary.length, 1, 'sin datos para la tendencia, no se menciona');
+  assert.ok(!/cosmetóloga|define en persona|diagnóstico/.test(a.summary.concat(b.summary).join(' ')));
+  const words = a.summary.join(' ').split(/\s+/).length; assert.ok(words <= 30, 'resumen corto: ' + words);
+  assert.ok(a.work.length <= 3 && a.work.length > 0);
+  assert.equal(a.work[0].id, 'ORI-BRILLO'); assert.deepEqual(a.work[0].marks, [1], 'ligado a la marca del brillo');
+  assert.ok(a.work.every(w => w.text.split(/\s+/).length <= 10));
 });
 
 test('sin diagnósticos ni términos prohibidos en ninguna combinación', () => {
@@ -154,7 +201,7 @@ test('sin diagnósticos ni términos prohibidos en ninguna combinación', () => 
 
 test('geometría inválida o categoría desconocida: se descarta antes de mostrar', () => {
   const obs = EV.observePhoto(BUSY, GOOD, REGIONS);
-  obs[0].geometry = { type: 'region', polygons: [[[NaN, 1], [2, 2], [3, 3]]] };
+  obs[0].geometry = { type: 'marks', marks: [{ kind: 'punto', zone: 'frente', x: NaN, y: 1, r: 3 }] };
   obs.push({ category: 'acne', status: 'observado', description: 'x', geometry: null });
   const r = EV.buildReport(FULL, { observations: obs });
   assert.ok(!r.observations.some(o => o.category === 'brillo' || o.category === 'acne'));
@@ -163,6 +210,6 @@ test('geometría inválida o categoría desconocida: se descarta antes de mostra
 
 test('resumen para la profesional: solo texto, sin geometría ni foto', () => {
   const c = EV.compactReport(EV.buildReport(FULL, photoOf(BUSY)));
-  assert.ok(!/polygons|data:image|blob:/.test(JSON.stringify(c)));
+  assert.ok(!/marks|polygons|data:image|blob:/.test(JSON.stringify(c)));
   assert.equal(c.observations.length, 8);
 });

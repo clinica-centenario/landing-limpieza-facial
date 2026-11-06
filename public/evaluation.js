@@ -12,52 +12,65 @@
  * Método de la foto: MediaPipe Face Landmarker (red neuronal) SOLO ubica el rostro y sus puntos.
  * Las observaciones son mediciones de imagen (reflejos, contraste local, color relativo entre zonas)
  * con umbrales PROVISORIOS sin validación clínica. Por eso: sin conteos, sin puntajes, sin porcentajes,
- * sin marcas puntuales en la vista habitual, y "no evaluable" cuando la foto no alcanza.
+ * cada marca sale de una medición ubicada en la foto, y "no evaluable" distingue foto, contexto y detector.
  */
 (function (root) {
   'use strict';
 
-  var VERSION = 'v4-2026-11';
+  var VERSION = 'v4-2026-11b'; // el servidor acepta el prefijo "v4-"
   var PRO = 'Lic. Jaqueline Mansilla';
-  var DISCLAIMER = 'Orientación cosmética generada con IA a partir de tus fotos y respuestas. No es un diagnóstico. La cosmetóloga confirma los cuidados adecuados en consulta.';
+  var DISCLAIMER = 'Evaluación orientativa con IA. La cosmetóloga confirma los hallazgos y los cuidados adecuados en consulta.';
 
   var ST = { SEEN: 'observado', NOT_SEEN: 'no_observado', NA: 'no_evaluable' };
+  // Por qué algo no se evaluó. Se distingue para no culpar a la foto de un límite del detector:
+  //   foto      la captura no alcanza (detalle, luz, zona tapada, reflejos): repetirla puede ayudar
+  //   contexto  lo que contó la persona (maquillaje, crema, filtro)
+  //   detector  el análisis automático todavía no mide esa categoría: repetir la foto no cambia nada
+  var NA_KIND = { FOTO: 'foto', CONTEXTO: 'contexto', DETECTOR: 'detector' };
 
   // Categorías cosméticas, en el orden en que se muestran. color + número: nunca solo el color.
   var CATEGORIES = [
     { key: 'brillo', label: 'Brillo visible', color: '#a86a12' },
     { key: 'poros', label: 'Poros visibles', color: '#5b6b7a' },
-    { key: 'textura', label: 'Aspecto de textura irregular', color: '#3f6f93' },
-    { key: 'puntos_oscuros', label: 'Puntitos oscuros para revisar', color: '#6b4fa0' },
-    { key: 'puntos_claros', label: 'Pequeños puntos claros para revisar', color: '#5b6b7a' },
+    { key: 'textura', label: 'Textura irregular', color: '#3f6f93' },
+    { key: 'puntos_oscuros', label: 'Puntitos oscuros', color: '#6b4fa0' },
+    { key: 'puntos_claros', label: 'Puntitos claros', color: '#2f7d4f' },
     { key: 'enrojecimiento', label: 'Enrojecimiento visible', color: '#b4441a' },
-    { key: 'tono', label: 'Zonas de tono desigual', color: '#0f6e66' },
+    { key: 'tono', label: 'Tono desigual', color: '#0f6e66' },
     { key: 'descamacion', label: 'Descamación aparente', color: '#5b6b7a' }
   ];
   var CAT = {};
   CATEGORIES.forEach(function (c) { CAT[c.key] = c; });
+  var ZONE_LABEL = { frente: 'frente', nariz: 'nariz', mejilla_der: 'mejilla derecha', mejilla_izq: 'mejilla izquierda' };
 
   // Umbrales PROVISORIOS de las mediciones (sin validar: calibrar con ?diagnostico=1 y fotos reales).
   // No se muestran como números ni se presentan como validados.
-  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, rednessDiff: 0.035, texture: 7, toneCv: 0.07,
-    noseSpots: 3.5, noseBlobs: 3 };
-  // Requisitos de la foto por categoría. Son límites de muestreo, no de calibración:
-  // con menos píxeles por milímetro el detalle buscado ocupa 1 o 2 píxeles y no se distingue del ruido.
-  var NEEDS = { textura: { pxPerMm: 2.5 }, puntos_oscuros: { pxPerMm: 3 } };
+  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, shineZoneMin: 0.01, rednessDiff: 0.035, texture: 7, toneCv: 0.07,
+    noseSpots: 3.5, noseBlobs: 3, lightSpots: 3 };
+  // Detalle mínimo de la foto por categoría (píxeles por milímetro de piel). Es un límite de muestreo:
+  // con menos, lo buscado ocupa 1 o 2 píxeles y no se distingue del ruido. Se evalúa en cada foto.
+  var NEEDS = { textura: { pxPerMm: 2.5 }, puntos_oscuros: { pxPerMm: 3 }, puntos_claros: { pxPerMm: 3 } };
 
-  // Categorías que el método actual no puede sostener con una selfie: siempre "no evaluable".
-  var NOT_SUPPORTED = {
-    poros: 'Los poros son más chicos que el detalle que capta una foto de celular. Se ven en persona, con lupa.',
-    puntos_claros: 'En una foto, los reflejos de luz se confunden con puntitos claros. Se identifican en persona.',
-    descamacion: 'Una foto de celular no muestra la descamación con suficiente detalle. Contanos si la notás en el cuestionario.'
+  // Categorías que el detector actual todavía no mide (no es un problema de la foto).
+  var DETECTOR_GAP = {
+    poros: 'El análisis automático todavía no mide poros. Los revisa la cosmetóloga con lupa.',
+    descamacion: 'El análisis automático todavía no mide descamación. La revisa la cosmetóloga en persona.'
   };
 
-  var LIMITS = {
-    brillo: 'El brillo de una foto depende de la luz y de la hora. No mide cuánta grasa produce tu piel.',
-    textura: 'En una foto, el vello, las sombras o la compresión de la imagen pueden parecer textura.',
-    puntos_oscuros: 'Pueden ser poros, sombras o vello. Si son comedones lo confirma la cosmetóloga en persona.',
-    enrojecimiento: 'El lavado reciente, el calor o el color de la luz pueden enrojecer la piel un rato. No indica una enfermedad.',
-    tono: 'Sombras, pecas o vello pueden verse como tono desigual.'
+  // Lo que dice cada tarjeta: qué se observa, qué significa (una frase) y qué se puede valorar en consulta.
+  var CONTENT = {
+    brillo: { desc: ['En la foto se aprecia más brillo en esta zona.', 'En la foto se aprecia más brillo en estas zonas.'],
+      meaning: 'Puede estar influido por la iluminación o los productos aplicados.', consult: 'revisar esa zona junto con tu rutina de cuidado.' },
+    textura: { desc: ['La superficie se ve menos uniforme en esta zona.', 'La superficie se ve menos uniforme en estas zonas.'],
+      meaning: 'El vello, las sombras o la compresión de la foto pueden sumar a ese aspecto.', consult: 'ver la textura de cerca y qué exfoliación tolera tu piel.' },
+    puntos_oscuros: { desc: ['Se ven puntitos más oscuros que la piel de alrededor.'],
+      meaning: 'Pueden ser poros, sombras o vello: qué son lo confirma la cosmetóloga.', consult: 'revisar esos puntitos con lupa.' },
+    puntos_claros: { desc: ['Se ven pequeños puntos más claros que la piel de alrededor.'],
+      meaning: 'En una foto pueden confundirse con reflejos: qué son lo define la revisión en persona.', consult: 'revisarlos con lupa y buena luz.' },
+    enrojecimiento: { desc: ['Esta zona se ve más rojiza que la frente.', 'Estas zonas se ven más rojizas que la frente.'],
+      meaning: 'El lavado reciente, el calor o la luz pueden enrojecer la piel por un rato.', consult: 'ver cómo responde tu piel antes de elegir productos.' },
+    tono: { desc: ['Se ven zonas más claras y más oscuras.'],
+      meaning: 'Sombras, pecas o vello pueden sumar a ese aspecto.', consult: 'conversar qué luminosidad se puede esperar de una limpieza.' }
   };
 
   // ── Cuestionario ─────────────────────────────────────────────
@@ -137,87 +150,218 @@
   function has(list, v) { return Array.isArray(list) && list.indexOf(v) >= 0; }
 
   // ── Observaciones de la foto ─────────────────────────────────
+  function centroid(poly) {
+    var x = 0, y = 0; poly.forEach(function (p) { x += p[0]; y += p[1]; });
+    return { x: x / poly.length, y: y / poly.length };
+  }
+  function polyRadius(poly) { // radio de un círculo de igual área
+    var A = 0;
+    for (var i = 0; i < poly.length; i++) { var p = poly[i], q = poly[(i + 1) % poly.length]; A += p[0] * q[1] - q[0] * p[1]; }
+    return Math.sqrt(Math.abs(A) / 2 / Math.PI);
+  }
+  function inPoly(pt, poly) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if ((yi > pt.y) !== (yj > pt.y) && pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function zoneText(zs) {
+    var cheeks = zs.indexOf('mejilla_der') >= 0 && zs.indexOf('mejilla_izq') >= 0;
+    var parts = zs.filter(function (z) { return !cheeks || z.indexOf('mejilla') < 0; }).map(function (z) { return ZONE_LABEL[z]; });
+    if (cheeks) parts.push(parts.length ? 'mejillas' : 'ambas mejillas');
+    return joinEs(parts);
+  }
+
   /**
-   * @param m        mediciones del teléfono: shineT, shineC, redDiff, texture, toneCv, noseSpots, noseBlobs
-   * @param q        calidad: pxPerMm, sideLight (true si la luz llega despareja), occluded {frente, nariz, mejilla_der, mejilla_izq}
+   * @param m        mediciones del teléfono. Valores generales (los que se guardan para calibrar): shineT, shineC, redDiff,
+   *                 texture, toneCv, noseSpots, noseBlobs. Ubicación de la evidencia, en píxeles de la foto original:
+   *                 shine {zona: {frac, x, y, spread}} (dónde están los reflejos), cheeks {mejilla: {texture, redDiff, toneCv}},
+   *                 darkSpots [{x, y}] (puntitos oscuros en la nariz), lightSpots [{x, y}] (puntitos claros en las mejillas).
+   * @param q        calidad: pxPerMm, sideLight (luz despareja), occluded {frente, nariz, mejilla_der, mejilla_izq}
    * @param regions  polígonos en píxeles de la imagen original: frente, nariz, mejilla_der, mejilla_izq
-   * Devuelve una observación por categoría, con su estado. Solo las "observado" llevan geometría.
+   * Devuelve una observación por categoría. Solo las "observado" llevan marcas, y cada marca sale de una medición:
+   *   punto  círculo alrededor de la evidencia localizada (reflejos, puntitos)
+   *   zona   número en el centro de la zona medida, sin delimitar nada (hallazgos extendidos como rojez o tono)
    */
   function observePhoto(m, q, regions) {
     m = m || {}; q = q || {}; regions = regions || {};
-    var occ = q.occluded || {}, R = SKIN_RULES, out = [];
+    var occ = q.occluded || {}, R = SKIN_RULES, out = [], ppm = q.pxPerMm > 0 ? q.pxPerMm : 3;
     var cheeks = ['mejilla_der', 'mejilla_izq'].filter(function (z) { return !occ[z] && regions[z]; });
-    function geo(zones) {
-      var polys = zones.map(function (z) { return regions[z]; }).filter(function (p) { return Array.isArray(p) && p.length >= 3; });
-      return polys.length ? { type: 'region', polygons: polys } : null;
+    var hasPoly = function (z) { return Array.isArray(regions[z]) && regions[z].length >= 3; };
+    function zoneMark(z) { if (!hasPoly(z)) return null; var c = centroid(regions[z]); return { kind: 'zona', zone: z, x: c.x, y: c.y, r: 0 }; }
+    /** Círculo alrededor de la evidencia; si está muy repartida en la zona, se marca la zona (no se aparenta precisión). */
+    function markAt(c, spread, z) {
+      var minR = Math.max(8, 3 * ppm), maxR = hasPoly(z) ? polyRadius(regions[z]) * 0.9 : Infinity, want = 2 * (spread || 0) + minR * 0.5;
+      if (want > maxR) return { kind: 'zona', zone: z, x: c.x, y: c.y, r: 0 };
+      return { kind: 'punto', zone: z, x: c.x, y: c.y, r: Math.max(minR, want) };
+    }
+    function cluster(pts, z) {
+      var c = { x: 0, y: 0 }; pts.forEach(function (p) { c.x += p.x; c.y += p.y; }); c.x /= pts.length; c.y /= pts.length;
+      var s = 0; pts.forEach(function (p) { s += Math.pow(p.x - c.x, 2) + Math.pow(p.y - c.y, 2); });
+      return markAt(c, Math.sqrt(s / pts.length), z);
+    }
+    /**
+     * Puntitos agrupados por cercanía (a menos de ~5 mm entre sí): un círculo por grupo de 2 o más, hasta 3 por zona.
+     * Si no hay grupos (puntitos sueltos y repartidos), se señala la zona: no se dibuja un círculo por cada detección.
+     */
+    function groupMarks(pts, z) {
+      var link = 5 * ppm, left = pts.slice(), groups = [];
+      while (left.length) {
+        var g = [left.shift()];
+        for (var i = 0; i < g.length; i++) for (var j = left.length - 1; j >= 0; j--) {
+          if (Math.hypot(left[j].x - g[i].x, left[j].y - g[i].y) <= link) g.push(left.splice(j, 1)[0]);
+        }
+        groups.push(g);
+      }
+      var marks = groups.filter(function (g) { return g.length >= 2; }).sort(function (a, b) { return b.length - a.length; }).slice(0, 3)
+        .map(function (g) { return cluster(g, z); });
+      return marks.length ? marks : [zoneMark(z)];
     }
     function push(cat, status, extra) {
-      var o = { category: cat, label: CAT[cat].label, status: status, source: 'foto', zone: '', description: '', limitation: LIMITS[cat] || '', reason: '', geometry: null };
+      var o = { category: cat, label: CAT[cat].label, status: status, source: 'foto', zone: '', zones: [], description: '', meaning: '', consult: '',
+        limitation: '', reason: '', naKind: null, fix: null, geometry: null };
       Object.keys(extra || {}).forEach(function (k) { o[k] = extra[k]; });
-      if (o.status !== ST.SEEN) o.geometry = null;
+      if (status === ST.SEEN) {
+        var C = CONTENT[cat];
+        o.zone = zoneText(o.zones); o.description = C.desc[o.zones.length > 1 && C.desc[1] ? 1 : 0];
+        o.meaning = o.limitation = C.meaning; o.consult = C.consult;
+        var marks = (o.marks || []).filter(Boolean);
+        o.geometry = marks.length ? { type: 'marks', marks: marks } : null;
+      } else o.geometry = null;
+      delete o.marks;
       out.push(o);
     }
-    var lowLight = q.sideLight ? 'La luz llega más de un lado de la cara.' : '';
+    function na(cat, fix, reason) { push(cat, ST.NA, { naKind: NA_KIND.FOTO, fix: fix, reason: reason }); }
+    var side = q.sideLight ? 'La luz llegó más de un lado de la cara.' : '';
+    var lowDetail = 'La foto no tiene suficiente detalle de cerca.';
 
-    // Brillo: reflejos de luz en frente y nariz comparados con las mejillas.
-    if (lowLight) push('brillo', ST.NA, { reason: lowLight });
-    else if (occ.frente && occ.nariz) push('brillo', ST.NA, { reason: 'Frente y nariz no se ven bien en esta foto.' });
-    else if (!isFinite(m.shineT) || !isFinite(m.shineC)) push('brillo', ST.NA, { reason: 'No se pudo medir en esta foto.' });
+    // Brillo: reflejos de luz en frente y nariz comparados con las mejillas. La marca va donde están los reflejos.
+    if (side) na('brillo', 'luz_lateral', side);
+    else if (occ.frente && occ.nariz) na('brillo', 'tapado', 'Frente y nariz no se ven bien en esta foto.');
+    else if (!isFinite(m.shineT) || !isFinite(m.shineC)) na('brillo', 'medicion', 'No se pudo medir en esta foto.');
     else {
-      var tz = ['frente', 'nariz'].filter(function (z) { return !occ[z]; });
-      if (m.shineT >= R.shineT && m.shineC >= R.shineGeneralC && cheeks.length) push('brillo', ST.SEEN, { zone: 'frente, nariz y mejillas', description: 'Reflejos de luz repartidos en frente, nariz y mejillas.', geometry: geo(tz.concat(cheeks)) });
-      else if (m.shineT >= R.shineT && m.shineT >= R.shineRatio * m.shineC + 0.01) push('brillo', ST.SEEN, { zone: tz.length === 2 ? 'frente y nariz' : tz[0], description: 'Reflejos de luz concentrados en ' + (tz.length === 2 ? 'frente y nariz' : 'la ' + tz[0]) + '.', geometry: geo(tz) });
-      else push('brillo', ST.NOT_SEEN, { zone: 'frente, nariz y mejillas' });
+      var tz = ['frente', 'nariz'].filter(function (z) { return !occ[z]; }), zs = null;
+      if (m.shineT >= R.shineT && m.shineC >= R.shineGeneralC && cheeks.length) zs = tz.concat(cheeks);
+      else if (m.shineT >= R.shineT && m.shineT >= R.shineRatio * m.shineC + 0.01) zs = tz;
+      if (!zs) push('brillo', ST.NOT_SEEN);
+      else {
+        var sh = m.shine || {}, ev = zs.filter(function (z) { return sh[z] && sh[z].frac >= R.shineZoneMin && isFinite(sh[z].x); });
+        if (ev.length) push('brillo', ST.SEEN, { zones: ev, marks: ev.map(function (z) { return markAt(sh[z], sh[z].spread, z); }) });
+        else push('brillo', ST.SEEN, { zones: zs, marks: zs.map(zoneMark) });
+      }
     }
 
-    push('poros', ST.NA, { reason: NOT_SUPPORTED.poros });
+    push('poros', ST.NA, { naKind: NA_KIND.DETECTOR, reason: DETECTOR_GAP.poros });
 
-    // Textura: energía de bordes finos en las mejillas, relativa al brillo de la zona.
-    if (!cheeks.length) push('textura', ST.NA, { reason: 'Las mejillas no se ven bien en esta foto.' });
-    else if (!(q.pxPerMm >= NEEDS.textura.pxPerMm)) push('textura', ST.NA, { reason: 'La foto no tiene suficiente detalle: acercá un poco más la cámara.' });
-    else if (!isFinite(m.texture)) push('textura', ST.NA, { reason: 'No se pudo medir en esta foto.' });
-    else if (m.texture >= R.texture) push('textura', ST.SEEN, { zone: 'mejillas', description: 'Las mejillas muestran una superficie menos uniforme.', geometry: geo(cheeks) });
-    else push('textura', ST.NOT_SEEN, { zone: 'mejillas' });
+    // Mejillas: se mide cada una; se marcan solo las que superan el umbral.
+    function cheekCat(cat, key, thr, avg, needs) {
+      if (!cheeks.length) return na(cat, 'tapado', 'Las mejillas no se ven bien en esta foto.');
+      if (needs && !(q.pxPerMm >= needs)) return na(cat, 'detalle', lowDetail);
+      if (!isFinite(avg)) return na(cat, 'medicion', 'No se pudo medir en esta foto.');
+      if (avg < thr) return push(cat, ST.NOT_SEEN);
+      var per = m.cheeks || {}, zs = cheeks.filter(function (z) { return per[z] && per[z][key] >= thr; });
+      if (!zs.length) zs = cheeks;
+      push(cat, ST.SEEN, { zones: zs, marks: zs.map(zoneMark) });
+    }
+    cheekCat('textura', 'texture', R.texture, m.texture, NEEDS.textura.pxPerMm);
 
     // Puntitos oscuros en la nariz: más oscuros que la piel de alrededor, chicos y aislados. Sin conteo.
-    if (occ.nariz || !regions.nariz) push('puntos_oscuros', ST.NA, { reason: 'La nariz no se ve bien en esta foto.' });
-    else if (!(q.pxPerMm >= NEEDS.puntos_oscuros.pxPerMm)) push('puntos_oscuros', ST.NA, { reason: 'La foto no tiene suficiente detalle en la nariz: acercá un poco más la cámara.' });
-    else if (!isFinite(m.noseSpots)) push('puntos_oscuros', ST.NA, { reason: 'No se pudo medir en esta foto.' });
-    else if (m.noseSpots >= R.noseSpots || m.noseBlobs >= R.noseBlobs) push('puntos_oscuros', ST.SEEN, { zone: 'nariz', description: 'Puntitos más oscuros que la piel de alrededor, en la nariz.', geometry: geo(['nariz']) });
-    else push('puntos_oscuros', ST.NOT_SEEN, { zone: 'nariz' });
+    if (occ.nariz || !hasPoly('nariz')) na('puntos_oscuros', 'tapado', 'La nariz no se ve bien en esta foto.');
+    else if (!(q.pxPerMm >= NEEDS.puntos_oscuros.pxPerMm)) na('puntos_oscuros', 'detalle', lowDetail);
+    else if (!isFinite(m.noseSpots)) na('puntos_oscuros', 'medicion', 'No se pudo medir en esta foto.');
+    else if (m.noseSpots >= R.noseSpots || m.noseBlobs >= R.noseBlobs) {
+      var ds = (m.darkSpots || []).filter(function (p) { return isFinite(p.x) && isFinite(p.y); });
+      push('puntos_oscuros', ST.SEEN, { zones: ['nariz'], marks: ds.length ? groupMarks(ds, 'nariz') : [zoneMark('nariz')] });
+    } else push('puntos_oscuros', ST.NOT_SEEN);
 
-    push('puntos_claros', ST.NA, { reason: NOT_SUPPORTED.puntos_claros });
+    // Puntitos claros en las mejillas: más claros que su entorno, chicos, sin color (los reflejos fuertes se descartan antes).
+    if (!cheeks.length) na('puntos_claros', 'tapado', 'Las mejillas no se ven bien en esta foto.');
+    else if (side) na('puntos_claros', 'luz_lateral', side);
+    else if (!(q.pxPerMm >= NEEDS.puntos_claros.pxPerMm)) na('puntos_claros', 'detalle', lowDetail);
+    else if (!Array.isArray(m.lightSpots)) na('puntos_claros', 'medicion', 'No se pudo medir en esta foto.');
+    else if (m.shineC >= R.shineGeneralC) na('puntos_claros', 'reflejos', 'Hay reflejos de luz en las mejillas: se confunden con puntitos claros.');
+    else {
+      var groups = {};
+      m.lightSpots.forEach(function (p) {
+        if (!isFinite(p.x) || !isFinite(p.y)) return;
+        var z = cheeks.filter(function (c) { return inPoly(p, regions[c]); })[0];
+        if (!z) { // cerca del borde de la zona: la mejilla más cercana
+          z = cheeks.slice().sort(function (a, b) { var A = centroid(regions[a]), B = centroid(regions[b]); return Math.hypot(p.x - A.x, p.y - A.y) - Math.hypot(p.x - B.x, p.y - B.y); })[0];
+        }
+        (groups[z] = groups[z] || []).push(p);
+      });
+      var total = Object.keys(groups).reduce(function (s, z) { return s + groups[z].length; }, 0);
+      if (total >= R.lightSpots) {
+        var gz = cheeks.filter(function (z) { return groups[z]; });
+        push('puntos_claros', ST.SEEN, { zones: gz, marks: [].concat.apply([], gz.map(function (z) { return groupMarks(groups[z], z); })) });
+      } else push('puntos_claros', ST.NOT_SEEN);
+    }
 
-    // Enrojecimiento: rojo relativo de las mejillas contra la frente (sin reflejos).
-    if (lowLight) push('enrojecimiento', ST.NA, { reason: lowLight });
-    else if (!cheeks.length || occ.frente) push('enrojecimiento', ST.NA, { reason: 'Hace falta ver bien la frente y las mejillas para comparar.' });
-    else if (!isFinite(m.redDiff)) push('enrojecimiento', ST.NA, { reason: 'No se pudo medir en esta foto.' });
-    else if (m.redDiff >= R.rednessDiff) push('enrojecimiento', ST.SEEN, { zone: 'mejillas', description: 'Las mejillas se ven más rojizas que la frente.', geometry: geo(cheeks) });
-    else push('enrojecimiento', ST.NOT_SEEN, { zone: 'mejillas' });
+    // Enrojecimiento: rojo relativo de cada mejilla contra la frente (sin reflejos).
+    if (side) na('enrojecimiento', 'luz_lateral', side);
+    else if (cheeks.length && occ.frente) na('enrojecimiento', 'tapado', 'Hace falta ver bien la frente para comparar.');
+    else cheekCat('enrojecimiento', 'redDiff', R.rednessDiff, m.redDiff);
 
-    // Tono: variación del color en las mejillas, descontando la luz que cambia de a poco.
-    if (lowLight) push('tono', ST.NA, { reason: lowLight });
-    else if (!cheeks.length) push('tono', ST.NA, { reason: 'Las mejillas no se ven bien en esta foto.' });
-    else if (!isFinite(m.toneCv)) push('tono', ST.NA, { reason: 'No se pudo medir en esta foto.' });
-    else if (m.toneCv >= R.toneCv) push('tono', ST.SEEN, { zone: 'mejillas', description: 'Zonas más claras y más oscuras en las mejillas.', geometry: geo(cheeks) });
-    else push('tono', ST.NOT_SEEN, { zone: 'mejillas' });
+    // Tono: variación del color en cada mejilla, descontando la luz que cambia de a poco.
+    if (side) na('tono', 'luz_lateral', side);
+    else cheekCat('tono', 'toneCv', R.toneCv, m.toneCv);
 
-    push('descamacion', ST.NA, { reason: NOT_SUPPORTED.descamacion });
-    return out;
+    push('descamacion', ST.NA, { naKind: NA_KIND.DETECTOR, reason: DETECTOR_GAP.descamacion });
+    var order = CATEGORIES.map(function (c) { return c.key; });
+    return out.sort(function (x, y) { return order.indexOf(x.category) - order.indexOf(y.category); });
   }
 
   /** Lo que la persona contó sobre la foto solo puede RESTAR evaluabilidad, nunca agregar hallazgos. */
   function applyPhotoContext(obs, a) {
     var because = {};
-    if (a.en_cara === 'maquillaje') ['brillo', 'textura', 'puntos_oscuros', 'enrojecimiento', 'tono'].forEach(function (c) { because[c] = 'Tenías maquillaje: puede cubrir o cambiar lo que se ve.'; });
-    else if (a.en_cara === 'crema') because.brillo = 'Tenías crema o protector: el brillo puede venir del producto.';
-    if (a.filtro === 'si') ['textura', 'puntos_oscuros', 'enrojecimiento', 'tono'].forEach(function (c) { because[c] = because[c] || 'La foto tiene filtro: puede alisar o cambiar el color de la piel.'; });
+    if (a.en_cara === 'maquillaje') ['brillo', 'textura', 'puntos_oscuros', 'puntos_claros', 'enrojecimiento', 'tono'].forEach(function (c) { because[c] = ['maquillaje', 'Tenías maquillaje: puede cubrir o cambiar lo que se ve.']; });
+    else if (a.en_cara === 'crema') ['brillo', 'puntos_claros'].forEach(function (c) { because[c] = ['crema', 'Tenías crema o protector: el producto puede dar brillo.']; });
+    if (a.filtro === 'si') ['textura', 'puntos_oscuros', 'puntos_claros', 'enrojecimiento', 'tono'].forEach(function (c) { because[c] = because[c] || ['filtro', 'La foto tiene filtro: puede alisar o cambiar el color de la piel.']; });
     return obs.map(function (o) {
       var c = Object.assign({}, o);
-      if (because[c.category] && c.status !== ST.NA) { c.status = ST.NA; c.reason = because[c.category]; c.geometry = null; c.description = ''; }
-      if (a.filtro === 'nose' && c.status === ST.SEEN) c.limitation = c.limitation + ' Si la foto tiene filtro, puede verse distinto.';
+      if (because[c.category] && c.status !== ST.NA) {
+        c.status = ST.NA; c.naKind = NA_KIND.CONTEXTO; c.fix = because[c.category][0]; c.reason = because[c.category][1];
+        c.geometry = null; c.description = c.meaning = c.consult = c.limitation = c.zone = ''; c.zones = [];
+      }
+      if (a.filtro === 'nose' && c.status === ST.SEEN) c.meaning = c.limitation = c.meaning + ' Si la foto tiene filtro, puede verse distinto.';
       return c;
     });
+  }
+
+  /**
+   * ¿El problema es la captura? Solo cuando no hubo observaciones y la foto (o lo que contó la persona) dejó afuera
+   * más categorías de las que se pudieron evaluar. Los límites del detector nunca piden repetir la foto.
+   */
+  var FIX_ORDER = ['maquillaje', 'tapado', 'luz_lateral', 'reflejos', 'detalle', 'filtro', 'crema', 'medicion'];
+  var ADVICE = {
+    detalle: 'No pudimos distinguir suficientes detalles. Repetí la foto con luz uniforme y acercá un poco más la cámara.',
+    luz_lateral: 'La luz llegó despareja a tu cara. Repetí la foto de frente a una ventana, con luz uniforme.',
+    tapado: 'Parte de tu cara quedó tapada o con sombra. Repetí la foto con la cara despejada.',
+    reflejos: 'Hay reflejos de luz fuertes en la piel. Repetí la foto con una luz más suave.',
+    maquillaje: 'Con maquillaje no podemos ver bien la piel. Si querés, repetí la foto con la cara lavada.',
+    crema: 'La crema puede dar brillo en la foto. Si querés, repetí la foto con la cara lavada.',
+    filtro: 'El filtro cambia cómo se ve la piel. Si podés, usá una foto sin filtro.',
+    medicion: 'No pudimos analizar bien esta foto. Probá repetirla con luz uniforme.'
+  };
+  var TIP = {
+    detalle: 'Para revisar más detalles, repetí la foto acercando un poco la cámara.',
+    luz_lateral: 'Para evaluar también brillo, rojez y tono, repetí la foto con luz de frente.',
+    tapado: 'Para evaluar toda la cara, repetí la foto con la cara despejada.',
+    reflejos: 'Para revisar los puntitos claros, repetí la foto con una luz más suave.',
+    maquillaje: ADVICE.maquillaje, crema: ADVICE.crema, filtro: ADVICE.filtro, medicion: ADVICE.medicion
+  };
+  function captureOf(obs, photo) {
+    if (!photo) return null;
+    var fixable = obs.filter(function (o) { return o.status === ST.NA && (o.naKind === NA_KIND.FOTO || o.naKind === NA_KIND.CONTEXTO); });
+    if (!fixable.length) return null;
+    // El motivo que deja afuera más categorías; a igualdad, el orden de FIX_ORDER.
+    var count = function (f) { return fixable.filter(function (o) { return o.fix === f; }).length; };
+    var fix = FIX_ORDER.slice().sort(function (x, y) { return count(y) - count(x) || FIX_ORDER.indexOf(x) - FIX_ORDER.indexOf(y); })[0];
+    var seen = obs.some(function (o) { return o.status === ST.SEEN; }), notSeen = obs.filter(function (o) { return o.status === ST.NOT_SEEN; }).length;
+    var blocking = !seen && fixable.length > notSeen;
+    return { fix: fix, blocking: blocking, text: blocking ? ADVICE[fix] : TIP[fix] };
   }
 
   // ── Informe ──────────────────────────────────────────────────
@@ -284,75 +428,80 @@
     return r;
   }
 
-  function orientationsOf(a, obs, tendency) {
-    var seen = function (c) { return obs.some(function (o) { return o.category === c && o.status === ST.SEEN; }); };
+  function orientationsOf(a, obs) {
+    var seenObs = function (c) { return obs.filter(function (o) { return o.category === c && o.status === ST.SEEN; })[0]; };
+    var seen = function (c) { return !!seenObs(c); };
     var goal = a.objetivo, out = [];
-    function add(id, text, short, because, matchesGoal) {
-      out.push({ id: id, text: text, short: short, because: because, goal: !!matchesGoal });
+    // short: lo que se muestra en "Qué podemos trabajar" · text: versión completa (para la profesional)
+    function add(id, text, short, because, matchesGoal, cats) {
+      var marks = (cats || []).map(seenObs).filter(Boolean).map(function (o) { return o.n; }).filter(Boolean);
+      out.push({ id: id, text: text, short: short, because: because, goal: !!matchesGoal, marks: marks });
     }
     var b;
-    // Puntitos oscuros → comedones aptos para extracción (valoración presencial).
     b = [];
     if (seen('puntos_oscuros')) b.push('En tu foto se ven puntitos oscuros en la nariz.');
     if (goal === 'puntos') b.push('Elegiste despejar puntitos oscuros o poros.');
-    if (b.length) add('ORI-COMEDONES', 'Valorar en persona si hay comedones aptos para extracción. No todos los puntitos oscuros lo son ni se extraen todos en una sesión.', 'si hay comedones aptos para extracción', b, goal === 'puntos');
-    // Brillo
+    if (b.length) add('ORI-COMEDONES', 'Valorar en persona si hay comedones aptos para extracción. No todos los puntitos oscuros lo son ni se extraen todos en una sesión.',
+      'Revisar los puntitos oscuros y ver qué conviene hacer.', b, goal === 'puntos', ['puntos_oscuros']);
+    if (seen('puntos_claros')) add('ORI-CLAROS', 'Revisar con lupa los puntitos claros que se ven en la foto antes de decidir si se trabajan.',
+      'Revisar con lupa los puntitos claros.', ['En tu foto se ven puntitos claros en ' + seenObs('puntos_claros').zone + '.'], false, ['puntos_claros']);
     b = [];
-    if (seen('brillo')) b.push('En tu foto se ven reflejos de luz en ' + obs.filter(function (o) { return o.category === 'brillo'; })[0].zone + '.');
+    if (seen('brillo')) b.push('En tu foto se aprecia brillo en ' + seenObs('brillo').zone + '.');
     if (a.brillo_donde === 'toda' || a.brillo_donde === 'zona_t') b.push('Contaste brillo ' + (a.brillo_donde === 'toda' ? 'en toda la cara.' : 'en frente, nariz y mentón.'));
     if (goal === 'brillo') b.push('Elegiste tener menos brillo.');
-    if (b.length) add('ORI-BRILLO', 'Trabajar la limpieza de las zonas con brillo. El brillo vuelve con los días: no es un cambio permanente.', 'la limpieza de las zonas con brillo', b, goal === 'brillo');
-    // Tirantez / descamación / confort
+    if (b.length) add('ORI-BRILLO', 'Trabajar la limpieza de las zonas con brillo. El brillo vuelve con los días: no es un cambio permanente.',
+      'Limpieza profunda de las zonas con brillo.', b, goal === 'brillo', ['brillo']);
     b = [];
     if (a.tirantez === 'siempre' || a.tirantez === 'aveces') b.push('Contaste tirantez después de lavarte.');
     if (a.descamacion === 'seguido' || a.descamacion === 'aveces') b.push('Contaste descamación.');
     if (goal === 'confort') b.push('Elegiste confort e hidratación.');
-    if (b.length) add('ORI-CONFORT', 'Valorar cuidados orientados al confort y a la hidratación superficial.', 'cuidados para el confort y la hidratación superficial', b, goal === 'confort');
-    // Tolerancia
+    if (b.length) add('ORI-CONFORT', 'Valorar cuidados orientados al confort y a la hidratación superficial.', 'Confort e hidratación de la piel.', b, goal === 'confort');
     b = [];
     if (a.reactividad === 'seguido' || a.reactividad === 'aveces') b.push('Contaste ardor, picazón o enrojecimiento con algunos productos.');
     if (has(a.recientes, 'retinoides')) b.push('Usaste retinoides o ácidos en la última semana.');
     if (has(a.recientes, 'procedimiento')) b.push('Te hiciste un procedimiento en el último mes.');
     if (has(a.recientes, 'sol')) b.push('Tomaste mucho sol hace poco.');
     if (has(a.recientes, 'medicacion')) b.push('Estás con medicación para la piel.');
-    if (seen('enrojecimiento')) b.push('En tu foto las mejillas se ven más rojizas que la frente.');
-    if (b.length) add('ORI-TOLERANCIA', 'Revisar la tolerancia de tu piel antes de elegir productos y técnicas. Algunas pueden esperar a otra sesión.', 'la tolerancia de tu piel antes de elegir técnicas', b, false);
-    // Textura
+    if (seen('enrojecimiento')) b.push('En tu foto se ve más rojez en ' + seenObs('enrojecimiento').zone + '.');
+    if (b.length) add('ORI-TOLERANCIA', 'Revisar la tolerancia de tu piel antes de elegir productos y técnicas. Algunas pueden esperar a otra sesión.',
+      'Elegir productos y técnicas según lo que tolere tu piel.', b, false, ['enrojecimiento']);
     b = [];
-    if (seen('textura')) b.push('En tu foto las mejillas muestran una superficie menos uniforme.');
+    if (seen('textura')) b.push('En tu foto la superficie se ve menos uniforme en ' + seenObs('textura').zone + '.');
     if (goal === 'textura') b.push('Elegiste una piel más suave.');
-    if (b.length) add('ORI-TEXTURA', 'Valorar qué exfoliación tolera tu piel para trabajar la suavidad.', 'qué exfoliación tolera tu piel', b, goal === 'textura');
-    // Tono / luminosidad
+    if (b.length) add('ORI-TEXTURA', 'Valorar qué exfoliación tolera tu piel para trabajar la suavidad.', 'Suavidad, con la exfoliación que tolere tu piel.', b, goal === 'textura', ['textura']);
     b = [];
-    if (seen('tono')) b.push('En tu foto se ven zonas de tono desigual en las mejillas.');
+    if (seen('tono')) b.push('En tu foto se ven zonas de tono desigual en ' + seenObs('tono').zone + '.');
     if (goal === 'luminosidad') b.push('Elegiste un aspecto más luminoso.');
-    if (b.length) add('ORI-TONO', 'Una limpieza puede dar un aspecto más luminoso por unos días, pero no es un tratamiento para eliminar manchas ni emparejar el tono.', 'qué aspecto luminoso se puede lograr, sin tratar manchas', b, goal === 'luminosidad');
+    if (b.length) add('ORI-TONO', 'Una limpieza puede dar un aspecto más luminoso por unos días, pero no es un tratamiento para eliminar manchas ni emparejar el tono.',
+      'Aspecto más luminoso (una limpieza no trata manchas).', b, goal === 'luminosidad', ['tono']);
     if (goal === 'cuidado' || !out.length) {
-      add('ORI-CUIDADO', 'Una sesión de 60 minutos con la ' + PRO + ', adaptada a lo que ella observe en persona.', 'cómo adaptar la sesión a tu piel',
+      add('ORI-CUIDADO', 'Una sesión de 60 minutos con la ' + PRO + ', adaptada a lo que ella observe en persona.', 'Una sesión adaptada a lo que observe la cosmetóloga.',
         goal === 'cuidado' ? ['Elegiste darte un momento de cuidado.'] : ['No surgió un foco particular de tus fotos ni de tus respuestas.'], goal === 'cuidado');
     }
-    // Primero lo que coincide con su objetivo.
-    out.sort(function (x, y) { return (y.goal ? 1 : 0) - (x.goal ? 1 : 0); });
+    // Primero lo que coincide con su objetivo; después lo que se ve en la foto.
+    var rank = function (o) { return (o.goal ? 2 : 0) + (o.marks.length ? 1 : 0); };
+    out.forEach(function (o, i) { o._i = i; });
+    out.sort(function (x, y) { return rank(y) - rank(x) || x._i - y._i; });
+    out.forEach(function (o) { delete o._i; });
     return out;
   }
 
   function joinEs(list) { return list.length <= 1 ? (list[0] || '') : list.slice(0, -1).join(', ') + ' y ' + list[list.length - 1]; }
-  var OBS_SHORT = { brillo: 'reflejos de luz en ', textura: 'una superficie menos uniforme en las ', puntos_oscuros: 'puntitos oscuros en la ', enrojecimiento: 'más rojez en las ', tono: 'tono desigual en las ' };
+  var GOAL_CATS = { puntos: ['puntos_oscuros'], brillo: ['brillo'], textura: ['textura'], luminosidad: ['tono'] };
 
+  /** Una o dos frases. No repite las tarjetas ni las advertencias. Sin datos para la tendencia, no la menciona. */
   function summaryOf(r, a) {
-    var s = [], t = r.tendency, sens = a.reactividad === 'seguido' || a.reactividad === 'aveces';
+    var s = [], seen = r.observations.filter(function (o) { return o.status === ST.SEEN; });
+    if (r.photo !== 'analizada') s.push('Sin foto, esta orientación sale solo de tus respuestas.');
+    else if (r.capture && r.capture.blocking) s.push(r.capture.text);
+    else if (seen.length) {
+      var match = (GOAL_CATS[a.objetivo] || []).some(function (c) { return seen.some(function (o) { return o.category === c; }); });
+      s.push(match ? 'Lo marcado en tu foto coincide con lo que buscás: ' + label('objetivo', a.objetivo).toLowerCase() + '.'
+        : 'Marcamos en tu foto lo que conviene mirar de cerca en la consulta.');
+    } else s.push('No encontramos detalles destacados en las zonas que pudimos evaluar.');
+    var t = r.tendency, sens = a.reactividad === 'seguido' || a.reactividad === 'aveces';
     if (t.key) s.push('Por lo que contaste, tu piel tendería a ser ' + TENDENCY_LABEL[t.key] + (sens ? ', con sensibilidad a algunos productos' : '') + '.');
-    else s.push(sens ? 'Contaste sensibilidad a algunos productos; la tendencia de tu piel la define la cosmetóloga en persona.' : 'La tendencia de tu piel la define la cosmetóloga en persona: tus respuestas no alcanzan para orientarla.');
-    var seen = r.observations.filter(function (o) { return o.status === ST.SEEN; });
-    if (r.photo !== 'analizada') s.push('No sumaste foto: el resultado sale de tus respuestas.');
-    else if (seen.length) s.push('En tu foto se observan ' + joinEs(seen.slice(0, 3).map(function (o) { return OBS_SHORT[o.category] + o.zone; })) + '.');
-    else if (r.observations.some(function (o) { return o.status === ST.NOT_SEEN; })) s.push('En tu foto no se observaron diferencias claras en lo que se pudo evaluar.');
-    else s.push('Tu foto no permitió evaluar la piel con claridad.');
-    if (r.preReview.some(function (p) { return p.kind === 'medica'; })) s.push('Antes de tratar la zona que nos contaste, conviene una consulta médica.');
-    else if (r.orientations.length) {
-      var o = r.orientations[0];
-      s.push((o.goal && a.objetivo ? 'Para lo que buscás, en' : 'En') + ' la consulta se puede valorar ' + o.short + '.');
-    }
+    else if (sens) s.push('Contaste sensibilidad a algunos productos.');
     return s;
   }
 
@@ -368,49 +517,57 @@
     obs.forEach(function (o) { if (o.status === ST.SEEN) o.n = ++seenN; o.id = 'OBS-' + o.category; });
     var r = { version: VERSION, photo: photo ? 'analizada' : 'sin_foto', tendency: tendencyOf(a), observations: obs,
       declared: declaredOf(a), preReview: preReviewOf(a), disclaimer: DISCLAIMER };
-    r.orientations = orientationsOf(a, obs, r.tendency);
+    r.capture = captureOf(obs, !!photo);
+    r.orientations = orientationsOf(a, obs);
+    r.work = r.orientations.slice(0, 3).map(function (o) { return { id: o.id, text: o.short, marks: o.marks }; });
     r.summary = summaryOf(r, a);
     var errs = validateReport(r);
     if (errs.length) throw new Error('Informe inválido: ' + errs.join('; '));
     return r;
   }
 
-  function validPolygon(p) { return Array.isArray(p) && p.length >= 3 && p.every(function (pt) { return Array.isArray(pt) && isFinite(pt[0]) && isFinite(pt[1]) && pt[0] >= 0 && pt[1] >= 0; }); }
+  function validMark(k) {
+    return k && (k.kind === 'punto' || k.kind === 'zona') && ZONE_LABEL[k.zone] && [k.x, k.y, k.r].every(function (v) { return typeof v === 'number' && isFinite(v) && v >= 0; });
+  }
   function validObservation(o) {
     if (!o || !CAT[o.category] || [ST.SEEN, ST.NOT_SEEN, ST.NA].indexOf(o.status) < 0) return false;
-    if (o.status === ST.SEEN) return !!o.description && (!o.geometry || (o.geometry.type === 'region' && o.geometry.polygons.length && o.geometry.polygons.every(validPolygon)));
+    if (o.status === ST.SEEN) return !!o.description && !!o.zone && (!o.geometry || (o.geometry.type === 'marks' && o.geometry.marks.length > 0 && o.geometry.marks.every(validMark)));
     if (o.status === ST.NA) return !!o.reason && !o.geometry;
     return !o.geometry;
   }
   // Palabras que el informe nunca debe contener (diagnósticos, mediciones que el método no sostiene).
-  var FORBIDDEN = /\b(acn[eé]|ros[aá]cea|melasma|dermatitis|psoriasis|eccema|c[aá]ncer|melanoma|sebo|nivel de hidrataci[oó]n|barrera|edad de la piel|puntaje|probabilidad)\b|%/i;
+  var FORBIDDEN = /\b(acn[eé]|ros[aá]cea|melasma|milium|milia|dermatitis|psoriasis|eccema|c[aá]ncer|melanoma|sebo|nivel de hidrataci[oó]n|barrera|edad de la piel|puntaje|probabilidad|sana)\b|%/i;
   function validateReport(r) {
     var e = [];
     if (!r || r.version !== VERSION) e.push('versión');
     (r.observations || []).forEach(function (o) { if (!validObservation(o)) e.push('observación ' + (o && o.category)); });
-    if (!Array.isArray(r.summary) || r.summary.length < 2 || r.summary.length > 3) e.push('resumen');
-    var text = JSON.stringify([r.summary, r.observations.map(function (o) { return [o.description, o.limitation, o.reason]; }), r.declared, r.orientations, r.preReview]);
+    if (!Array.isArray(r.summary) || r.summary.length < 1 || r.summary.length > 2) e.push('resumen');
+    if (!Array.isArray(r.work) || r.work.length > 3) e.push('qué trabajar');
+    var text = JSON.stringify([r.summary, r.observations.map(function (o) { return [o.description, o.meaning, o.consult, o.reason]; }), r.declared, r.orientations, r.preReview, r.capture]);
     if (FORBIDDEN.test(text)) e.push('texto no permitido');
     if (/\(\d+\)/.test(text)) e.push('conteo');
     return e;
   }
 
-  /** Versión compacta y en texto para enviar a la profesional (solo con consentimiento). Sin la foto. */
+  /** Versión compacta y en texto para enviar a la profesional (solo con consentimiento). Sin la foto ni las marcas. */
   function compactReport(r) {
+    var cap = function (t) { return t.charAt(0).toUpperCase() + t.slice(1); };
     return {
       version: r.version, photo: r.photo,
       tendency: r.tendency.key ? TENDENCY_LABEL[r.tendency.key] + (r.tendency.certainty ? ' (' + r.tendency.certainty + ')' : '') : 'sin orientar',
-      observations: r.observations.map(function (o) { return { category: o.category, status: o.status, text: o.status === ST.SEEN ? o.description : o.status === ST.NA ? o.reason : '' }; }),
+      observations: r.observations.map(function (o) {
+        return { category: o.category, status: o.status, text: o.status === ST.SEEN ? cap(o.zone) + ': ' + o.description : o.status === ST.NA ? o.reason : '' };
+      }),
       declared: r.declared.map(function (d) { return d.text; }),
       orientations: r.orientations.map(function (o) { return o.text; }),
       preReview: r.preReview.map(function (p) { return p.text; })
     };
   }
 
-  var api = { VERSION: VERSION, PRO: PRO, DISCLAIMER: DISCLAIMER, ST: ST, CATEGORIES: CATEGORIES, CAT: CAT, SKIN_RULES: SKIN_RULES, NEEDS: NEEDS,
-    QUIZ: QUIZ, quizFor: quizFor, visibleItems: visibleItems, missingIn: missingIn, cleanAnswers: cleanAnswers,
+  var api = { VERSION: VERSION, PRO: PRO, DISCLAIMER: DISCLAIMER, ST: ST, NA_KIND: NA_KIND, CATEGORIES: CATEGORIES, CAT: CAT, ZONE_LABEL: ZONE_LABEL,
+    SKIN_RULES: SKIN_RULES, NEEDS: NEEDS, QUIZ: QUIZ, quizFor: quizFor, visibleItems: visibleItems, missingIn: missingIn, cleanAnswers: cleanAnswers,
     observePhoto: observePhoto, applyPhotoContext: applyPhotoContext, buildReport: buildReport, validateReport: validateReport,
-    compactReport: compactReport, TENDENCY_LABEL: TENDENCY_LABEL };
+    compactReport: compactReport, TENDENCY_LABEL: TENDENCY_LABEL, label: label };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CCEval = api;
 })(typeof window !== 'undefined' ? window : this);

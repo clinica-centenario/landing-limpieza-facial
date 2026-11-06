@@ -801,6 +801,9 @@
     var card = $('#analisis .ai-tool');
     // photo: foto aceptada · pending: foto en revisión. { canvas, P, upload, mirror, url, quality, measures, observations, spots, checks }
     var answers = {}, screens = [], qi = 0, photo = null, pending = null, report = null, lms = {}, cam = null, camToken = null;
+    // retake: "Repetir foto" desde el resultado (la foto anterior se conserva hasta aceptar la nueva) ·
+    // resume: después de la nueva foto solo se preguntan las respuestas que falten (las de la foto se vuelven a pedir).
+    var retake = false, resume = false;
 
     function show(name) {
       if (name !== 'camara') stopCamera();
@@ -833,7 +836,19 @@
     $('#aiStart').addEventListener('click', function () { if (needsAdult()) return; begin(); startCamera(); });
     $('#aiUploadStart').addEventListener('click', function () { if (needsAdult()) return; begin(); $('#aiFile').click(); });
     $('#aiNoPhoto').addEventListener('click', function () { if (needsAdult()) return; begin(); withoutPhoto(); });
-    function withoutPhoto() { discardPhotos(); startQuiz(); }
+    function withoutPhoto() {
+      if (retake && report) { setRetake(false); releasePhoto(pending); pending = null; show('resultado'); return; }
+      discardPhotos(); startQuiz();
+    }
+    function setRetake(on) {
+      retake = on;
+      $('#aiCamSkip').textContent = $('#aiReviewSkip').textContent = on ? 'Volver al resultado' : 'Seguir sin foto';
+    }
+    function retakePhoto() {
+      setRetake(true);
+      Track.send('analisis_repetir_foto', { dedupeKey: 'analisis_repetir_foto:' + Date.now() });
+      if (photo && photo.upload) $('#aiFile').click(); else startCamera();
+    }
 
     // 2. Cámara guiada: una foto de frente, con captura automática cuando la cara está bien ubicada
     function setMsg(t, ready) { $('#aiCamMsg').textContent = t; $('#aiCam').classList.toggle('is-ready', !!ready); }
@@ -999,7 +1014,7 @@
       var occ = occlusionOf(canvas, regions);
       var pxPerMm = Math.hypot((P[454].x - P[234].x) * W, (P[454].y - P[234].y) * H) / FACE_WIDTH_MM;
       var quality = { pxPerMm: +pxPerMm.toFixed(2), sideLight: checks.luzLados > PHOTO_RULES.maxSideLight, occluded: occ.occluded };
-      var measures = measureSkin(canvas, P, occ.occluded);
+      var measures = measureSkin(canvas, P, occ.occluded, regions);
       var observations = EV.observePhoto(measures, quality, regions);
       return { regions: regions, quality: quality, occlusionFrac: occ.frac, measures: measures, observations: observations, spots: measures.spots };
     }
@@ -1017,7 +1032,7 @@
       }, 'image/jpeg', 0.92);
       diag({ controles: o.checks, calidad: a.quality, zonasTapadas: a.occlusionFrac, mediciones: a.measures.raw,
         observaciones: a.observations.map(function (x) { return x.category + ': ' + x.status + (x.reason ? ' (' + x.reason + ')' : ''); }),
-        puntualesSoloDiagnostico: a.spots.counts });
+        puntitos: { oscurosNariz: a.measures.darkSpots.length, clarosMejillas: a.measures.lightSpots.length }, reflejos: a.measures.shine });
     }
 
     // Revisión de la foto antes de usarla
@@ -1063,6 +1078,13 @@
       if (!pending) return;
       releasePhoto(photo); photo = pending; pending = null;
       Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
+      if (retake && report) { // nueva foto desde el resultado: se vuelve a preguntar solo lo de la foto
+        setRetake(false); delete answers.en_cara; delete answers.filtro;
+        screens = EV.quizFor({ photo: true, upload: !!photo.upload });
+        var nx = nextMissing(0);
+        if (nx < 0) return finish();
+        resume = true; qi = nx; show('quiz'); renderScreen(); return;
+      }
       startQuiz();
     });
     $('#aiRetry').addEventListener('click', function () {
@@ -1113,22 +1135,60 @@
       components(mask, w, h, function (cmp) { if (cmp.area <= maxArea) count++; });
       return count / g.length * 1000;
     }
-    function measureSkin(canvas, P, occ) {
+    /**
+     * Dónde están los reflejos (brillo) dentro de cada zona: fracción de píxeles con reflejo, su centro y cuánto se reparten,
+     * en píxeles de la foto original. Sirve para ubicar la marca sobre la evidencia, no en un lugar genérico.
+     */
+    function regionShine(canvas, regions) {
+      var all = [];
+      Object.keys(regions).forEach(function (z) { all = all.concat(regions[z]); });
+      var x0 = Math.min.apply(null, all.map(function (p) { return p[0]; })), x1 = Math.max.apply(null, all.map(function (p) { return p[0]; }));
+      var y0 = Math.min.apply(null, all.map(function (p) { return p[1]; })), y1 = Math.max.apply(null, all.map(function (p) { return p[1]; }));
+      var k = 240 / Math.max(1, x1 - x0), w = 240, h = Math.max(1, Math.round((y1 - y0) * k));
+      var c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, w, h);
+      var px = c.getContext('2d').getImageData(0, 0, w, h).data, out = {};
+      Object.keys(regions).forEach(function (z) {
+        var m = document.createElement('canvas'); m.width = w; m.height = h;
+        var mc = m.getContext('2d'); mc.beginPath();
+        regions[z].forEach(function (p, i) { var X = (p[0] - x0) * k, Y = (p[1] - y0) * k; if (i) mc.lineTo(X, Y); else mc.moveTo(X, Y); });
+        mc.closePath(); mc.fillStyle = '#fff'; mc.fill();
+        var md = mc.getImageData(0, 0, w, h).data, n = 0, s = 0, sx = 0, sy = 0, pts = [];
+        for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+          var i = (y * w + x) * 4; if (md[i] <= 127) continue; n++;
+          var r = px[i], g = px[i + 1], b = px[i + 2], lum = 0.299 * r + 0.587 * g + 0.114 * b, mx = Math.max(r, g, b), sat = mx ? (mx - Math.min(r, g, b)) / mx : 0;
+          if (lum >= 230 && sat < 0.25) { s++; sx += x; sy += y; pts.push(x, y); }
+        }
+        if (!s) { out[z] = { frac: 0 }; return; }
+        var cx = sx / s, cy = sy / s, v = 0;
+        for (var j = 0; j < pts.length; j += 2) v += Math.pow(pts[j] - cx, 2) + Math.pow(pts[j + 1] - cy, 2);
+        out[z] = { frac: +(s / n).toFixed(3), x: cx / k + x0, y: cy / k + y0, spread: Math.sqrt(v / s) / k };
+      });
+      return out;
+    }
+    function measureSkin(canvas, P, occ, regions) {
       var T = zoneStats(canvas, P, ZONE_T), N = zoneStats(canvas, P, ZONE_NOSE);
-      var cheeks = [];
-      if (!occ.mejilla_der) cheeks.push(zoneStats(canvas, P, CHEEK_R));
-      if (!occ.mejilla_izq) cheeks.push(zoneStats(canvas, P, CHEEK_L));
+      var per = {}, cheeks = [];
+      [['mejilla_der', CHEEK_R], ['mejilla_izq', CHEEK_L]].forEach(function (x) {
+        if (occ[x[0]]) return;
+        var c = zoneStats(canvas, P, x[1]); cheeks.push(c);
+        per[x[0]] = { texture: c.tex, redDiff: c.red - T.red, toneCv: c.cv };
+      });
       var avg = function (k) { return cheeks.length ? cheeks.reduce(function (s, c) { return s + c[k]; }, 0) / cheeks.length : NaN; };
-      var det = detectSpots(canvas, P); // localización puntual: SOLO diagnóstico (no validada para mostrar)
+      var det = detectSpots(canvas, P), W = canvas.width, H = canvas.height;
+      var at = function (type) { return det.spots.filter(function (f) { return f.type === type; }).map(function (f) { return { x: f.x * W, y: f.y * H }; }); };
       var m = { shineT: T.spec, shineC: avg('spec'), redDiff: avg('red') - T.red, texture: avg('tex'), toneCv: avg('cv'), noseSpots: N.spots, noseBlobs: det.counts.punto_negro };
       var raw = {};
       Object.keys(m).forEach(function (k) { raw[k] = isFinite(m[k]) ? +m[k].toFixed(3) : null; });
+      // Ubicación de la evidencia (solo en el teléfono; no se envía): reflejos por zona, cada mejilla, puntitos oscuros y claros.
+      m.shine = regionShine(canvas, regions); m.cheeks = per; m.darkSpots = at('punto_negro'); m.lightSpots = at('milium');
       m.raw = raw; m.spots = det;
       return m;
     }
 
     // 3. Cuestionario: pantallas cortas, nada marcado de antemano; "No sé" es una respuesta válida
-    function startQuiz() { screens = EV.quizFor({ photo: !!photo, upload: !!(photo && photo.upload) }); qi = 0; show('quiz'); renderScreen(); }
+    function nextMissing(from) { for (var i = from; i < screens.length; i++) if (EV.missingIn(screens[i], answers).length) return i; return -1; }
+    function startQuiz() { resume = false; screens = EV.quizFor({ photo: !!photo, upload: !!(photo && photo.upload) }); qi = 0; show('quiz'); renderScreen(); }
     function renderScreen() {
       var sc = screens[qi], box = $('#aiQ');
       $('#aiQStep').textContent = 'Paso ' + (qi + 1) + ' de ' + screens.length + ' · ' + sc.title;
@@ -1166,7 +1226,7 @@
           if (vis.length !== before) { renderScreen(); var f = $('input[name="q_' + k + '"]:checked', box); if (f) f.focus(); }
         }
       };
-      $('#aiQNext').textContent = qi === screens.length - 1 ? 'Ver mi resultado' : 'Siguiente';
+      $('#aiQNext').textContent = qi === screens.length - 1 || (resume && nextMissing(qi + 1) < 0) ? 'Ver mi resultado' : 'Siguiente';
     }
     $('#aiQBack').addEventListener('click', function () {
       if (qi > 0) { qi--; renderScreen(); return; }
@@ -1180,7 +1240,9 @@
         var first = $('fieldset.is-missing input', $('#aiQ')); if (first) first.focus();
         return;
       }
-      if (qi < screens.length - 1) { qi++; renderScreen(); $('#aiQStep').scrollIntoView({ block: 'nearest' }); return; }
+      var nx = resume ? nextMissing(qi + 1) : (qi < screens.length - 1 ? qi + 1 : -1);
+      if (nx >= 0) { qi = nx; renderScreen(); $('#aiQStep').scrollIntoView({ block: 'nearest' }); return; }
+      resume = false;
       $('#aiQBar').style.width = '100%';
       Track.send('analisis_cuestionario_completo', { dedupeKey: 'analisis_cuestionario:' + PAGE_LOADED_AT });
       if (session) finish(); else show('datos');
@@ -1211,170 +1273,217 @@
         show('resultado'); out.focus({ preventScroll: true });
       }
     }
-    function restartAll() { discardPhotos(); answers = {}; report = null; $('#aiResult').innerHTML = ''; show('intro'); }
+    function restartAll() { setRetake(false); resume = false; discardPhotos(); answers = {}; report = null; $('#aiResult').innerHTML = ''; show('intro'); }
 
     var SVGNS = 'http://www.w3.org/2000/svg';
     function svgEl(tag, attrs) { var e = document.createElementNS(SVGNS, tag); Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); }); return e; }
+    var HOVER = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
     /**
-     * Foto interactiva: un solo SVG con la imagen y las marcas en las MISMAS coordenadas (píxeles de la foto
-     * original), así quedan alineadas al cambiar el tamaño o la orientación de la pantalla. El recorte es el viewBox
-     * y el espejo es una transformación: la foto original no se modifica.
+     * Foto con marcas: un solo SVG con la imagen original y las marcas en las MISMAS coordenadas (píxeles de la foto),
+     * así siguen alineadas al ampliar, mover, cambiar el tamaño o girar la pantalla. El espejo es una transformación
+     * (la foto no se modifica). Ampliar: botones, pellizco con dos dedos o Ctrl + rueda; con la foto ampliada, se arrastra.
      */
-    function photoFigure(ph, seen, onSelect) {
-      var W = ph.canvas.width, H = ph.canvas.height, all = [];
-      Object.keys(ph.regions).forEach(function (z) { all = all.concat(ph.regions[z]); });
-      var xs = ph.P.map(function (p) { return p.x * W; }), ys = ph.P.map(function (p) { return p.y * H; });
+    function photoViewer(ph, seen, cb) {
+      var W = ph.canvas.width, H = ph.canvas.height;
+      var mx = function (x) { return ph.mirror ? W - x : x; };
+      var xs = ph.P.map(function (p) { return mx(p.x * W); }), ys = ph.P.map(function (p) { return p.y * H; });
       var fx0 = Math.min.apply(null, xs), fx1 = Math.max.apply(null, xs), fy0 = Math.min.apply(null, ys), fy1 = Math.max.apply(null, ys), pad = (fx1 - fx0) * 0.14;
-      var x0 = Math.max(0, fx0 - pad), x1 = Math.min(W, fx1 + pad), y0 = Math.max(0, fy0 - pad * 1.3), y1 = Math.min(H, fy1 + pad * 0.6);
-      var vw = x1 - x0, vh = y1 - y0;
-      var mx = function (x) { return ph.mirror ? x0 + x1 - x : x; };
-      var svg = svgEl('svg', { viewBox: [x0, y0, vw, vh].map(function (v) { return v.toFixed(1); }).join(' '), class: 'ai-photo-svg', role: 'group', 'aria-label': 'Tu foto con las zonas observadas' });
-      var g = svgEl('g', ph.mirror ? { transform: 'translate(' + (x0 + x1).toFixed(1) + ' 0) scale(-1 1)' } : {});
+      var bx0 = Math.max(0, fx0 - pad), bx1 = Math.min(W, fx1 + pad), by0 = Math.max(0, fy0 - pad * 1.3), by1 = Math.min(H, fy1 + pad * 0.6);
+      var base = { x: bx0, y: by0, w: bx1 - bx0, h: by1 - by0 }, view = Object.assign({}, base), sel = '', marksOn = true;
+      var svg = svgEl('svg', { class: 'ai-photo-svg', role: 'group', 'aria-label': 'Tu foto' + (seen.length ? ' con las observaciones marcadas' : '') });
+      svg.style.aspectRatio = (base.w / base.h).toFixed(4);
+      var g = svgEl('g', ph.mirror ? { transform: 'translate(' + W + ' 0) scale(-1 1)' } : {});
       var im = svgEl('image', { x: 0, y: 0, width: W, height: H, preserveAspectRatio: 'none' });
       im.setAttribute('href', ph.url); im.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', ph.url);
       g.appendChild(im); svg.appendChild(g);
-      var marks = svgEl('g', { class: 'ai-marks' }), badges = svgEl('g', { class: 'ai-marks' }), r = vw * 0.04, used = [];
+      var rings = svgEl('g', { class: 'ai-marks' }), badges = svgEl('g', { class: 'ai-marks' });
+      svg.appendChild(rings); svg.appendChild(badges);
+      // Anillos: solo donde la evidencia está localizada (reflejos, puntitos). En hallazgos extendidos va solo el número.
       seen.forEach(function (o) {
-        if (!o.geometry) return;
-        var color = EV.CAT[o.category].color;
-        var area = svgEl('g', { class: 'ai-area', 'data-n': o.n });
-        o.geometry.polygons.forEach(function (poly) {
-          area.appendChild(svgEl('polygon', { points: poly.map(function (p) { return mx(p[0]).toFixed(1) + ',' + p[1].toFixed(1); }).join(' '),
-            fill: color, 'fill-opacity': '0.16', stroke: color, 'stroke-width': (vw * 0.006).toFixed(2), 'stroke-dasharray': (vw * 0.018).toFixed(1) + ' ' + (vw * 0.012).toFixed(1), 'stroke-linejoin': 'round' }));
+        (o.geometry ? o.geometry.marks : []).forEach(function (k) {
+          if (k.kind !== 'punto') return;
+          rings.appendChild(svgEl('circle', { class: 'ai-ring', 'data-n': o.n, cx: mx(k.x).toFixed(1), cy: k.y.toFixed(1), r: k.r.toFixed(1),
+            stroke: EV.CAT[o.category].color, fill: 'none', 'vector-effect': 'non-scaling-stroke' }));
         });
-        marks.appendChild(area);
-        // Número: en el centro de la primera zona, corrido si ya hay otro número ahí (nunca dos en el mismo lugar).
-        var p0 = o.geometry.polygons[0], cx = 0, cy = 0;
-        p0.forEach(function (p) { cx += mx(p[0]); cy += p[1]; }); cx /= p0.length; cy /= p0.length;
-        while (used.some(function (u) { return Math.hypot(u[0] - cx, u[1] - cy) < r * 2.2; })) cy += r * 2.3;
-        used.push([cx, cy]);
-        var b = svgEl('g', { class: 'ai-badge', 'data-n': o.n, tabindex: '0', role: 'button', 'aria-label': 'Observación ' + o.n + ': ' + o.label + ', ' + o.zone });
-        b.appendChild(svgEl('circle', { cx: cx.toFixed(1), cy: cy.toFixed(1), r: r.toFixed(1), fill: color, stroke: '#fff', 'stroke-width': (r * 0.22).toFixed(1) }));
-        var t = svgEl('text', { x: cx.toFixed(1), y: cy.toFixed(1), 'font-size': (r * 1.15).toFixed(1), 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#fff' });
-        t.textContent = String(o.n); b.appendChild(t);
-        b.addEventListener('click', function () { onSelect(o.n, true); });
-        b.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(o.n, true); } });
-        badges.appendChild(b);
       });
-      svg.appendChild(marks); svg.appendChild(badges);
-      return svg;
+      var moved = false;
+      function drawBadges() {
+        badges.innerHTML = '';
+        var r = view.w * 0.036, used = [];
+        seen.forEach(function (o) {
+          (o.geometry ? o.geometry.marks : []).forEach(function (k, i) {
+            var cx = mx(k.x), cy = k.y;
+            if (k.kind === 'punto') { var d = Math.max(k.r, r * 0.6) * 0.71 + r * 0.55; cx += ph.mirror ? -d : d; cy -= d; }
+            for (var t = 0; t < 8 && used.some(function (u) { return Math.hypot(u[0] - cx, u[1] - cy) < r * 2.1; }); t++) cy += r * 2.2; // nunca dos números encimados
+            used.push([cx, cy]);
+            var b = svgEl('g', { class: 'ai-badge' + (String(o.n) === sel ? ' is-sel' : ''), 'data-n': o.n, tabindex: i ? '-1' : '0', role: 'button',
+              'aria-label': 'Marca ' + o.n + ': ' + o.label + ', ' + o.zone, 'aria-controls': 'aiDetail' });
+            if (i) b.setAttribute('aria-hidden', 'true');
+            b.appendChild(svgEl('circle', { cx: cx.toFixed(1), cy: cy.toFixed(1), r: r.toFixed(1), fill: EV.CAT[o.category].color, stroke: '#fff', 'stroke-width': (r * 0.2).toFixed(1) }));
+            var tx = svgEl('text', { x: cx.toFixed(1), y: cy.toFixed(1), 'font-size': (r * 1.15).toFixed(1), 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#fff' });
+            tx.textContent = String(o.n); b.appendChild(tx);
+            b.addEventListener('click', function (e) { e.stopPropagation(); if (!moved) cb.pick(o.n); });
+            b.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cb.pick(o.n); } });
+            if (HOVER) { b.addEventListener('mouseenter', function () { cb.hover(o.n); }); b.addEventListener('mouseleave', function () { cb.hover(null); }); }
+            badges.appendChild(b);
+          });
+        });
+      }
+      function setView(v) {
+        var w = Math.max(base.w / 5, Math.min(base.w, v.w)), h = w * base.h / base.w;
+        var cx = v.x + v.w / 2, cy = v.y + v.h / 2;
+        view = { w: w, h: h, x: Math.max(0, Math.min(W - w, cx - w / 2)), y: Math.max(0, Math.min(H - h, cy - h / 2)) };
+        if (w >= base.w - 0.5) view = Object.assign({}, base);
+        svg.setAttribute('viewBox', [view.x, view.y, view.w, view.h].map(function (n) { return n.toFixed(1); }).join(' '));
+        svg.classList.toggle('is-zoomed', view.w < base.w - 0.5);
+        if (zIn) { zIn.disabled = view.w <= base.w / 5 + 0.5; zOut.disabled = view.w >= base.w - 0.5; }
+        drawBadges();
+      }
+      function zoomBy(f, at) {
+        at = at || { x: view.x + view.w / 2, y: view.y + view.h / 2 };
+        var w = view.w / f, h = view.h / f;
+        setView({ x: at.x - (at.x - view.x) / f, y: at.y - (at.y - view.y) / f, w: w, h: h });
+      }
+      function toSvg(e) { var b = svg.getBoundingClientRect(); return { x: view.x + (e.clientX - b.left) / b.width * view.w, y: view.y + (e.clientY - b.top) / b.height * view.h }; }
+      var ptrs = {}, last = null, pinch = null;
+      svg.addEventListener('pointerdown', function (e) {
+        ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; moved = false; last = { x: e.clientX, y: e.clientY };
+        var ids = Object.keys(ptrs);
+        if (ids.length === 2) { var a = ptrs[ids[0]], c = ptrs[ids[1]]; pinch = { d: Math.hypot(a.x - c.x, a.y - c.y), w: view.w }; }
+      });
+      svg.addEventListener('pointermove', function (e) {
+        if (!ptrs[e.pointerId]) return;
+        ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+        var ids = Object.keys(ptrs), b = svg.getBoundingClientRect();
+        if (ids.length === 2 && pinch) {
+          var a = ptrs[ids[0]], c = ptrs[ids[1]], d = Math.hypot(a.x - c.x, a.y - c.y);
+          var mid = toSvg({ clientX: (a.x + c.x) / 2, clientY: (a.y + c.y) / 2 });
+          zoomBy(view.w / (pinch.w * pinch.d / Math.max(20, d)), mid); moved = true; e.preventDefault();
+        } else if (ids.length === 1 && svg.classList.contains('is-zoomed') && last) {
+          var dx = (e.clientX - last.x) / b.width * view.w, dy = (e.clientY - last.y) / b.height * view.h;
+          if (Math.abs(e.clientX - last.x) + Math.abs(e.clientY - last.y) > 0) {
+            setView({ x: view.x - dx, y: view.y - dy, w: view.w, h: view.h });
+            if (Math.abs(dx) + Math.abs(dy) > view.w * 0.004) moved = true;
+          }
+          last = { x: e.clientX, y: e.clientY }; e.preventDefault();
+        }
+      });
+      var up = function (e) { delete ptrs[e.pointerId]; if (Object.keys(ptrs).length < 2) pinch = null; last = null; setTimeout(function () { moved = false; }, 0); };
+      svg.addEventListener('pointerup', up); svg.addEventListener('pointercancel', up); svg.addEventListener('pointerleave', up);
+      svg.addEventListener('wheel', function (e) { if (!e.ctrlKey) return; e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, toSvg(e)); }, { passive: false });
+      svg.addEventListener('dblclick', function (e) { zoomBy(svg.classList.contains('is-zoomed') ? 1 / 8 : 2.2, toSvg(e)); });
+
+      var fig = el('figure', 'ai-photo'), frame = el('div', 'ai-photo-frame');
+      frame.appendChild(svg);
+      var zoom = el('div', 'ai-zoom'), zIn = el('button', 'ai-zoom-btn', '+'), zOut = el('button', 'ai-zoom-btn', '−');
+      zIn.type = zOut.type = 'button'; zIn.setAttribute('aria-label', 'Ampliar la foto'); zOut.setAttribute('aria-label', 'Alejar la foto');
+      var selCenter = function () {
+        var o = seen.filter(function (x) { return String(x.n) === sel; })[0], k = o && o.geometry && o.geometry.marks[0];
+        return k ? { x: mx(k.x), y: k.y } : null;
+      };
+      zIn.addEventListener('click', function () { var c = selCenter(); if (c) setView({ x: c.x - view.w / 4, y: c.y - view.h / 4, w: view.w / 2, h: view.h / 2 }); else zoomBy(2); });
+      zOut.addEventListener('click', function () { zoomBy(1 / 2); });
+      zoom.appendChild(zIn); zoom.appendChild(zOut); frame.appendChild(zoom);
+      fig.appendChild(frame);
+      setView(base);
+      return {
+        el: fig,
+        select: function (n) {
+          sel = n ? String(n) : '';
+          svg.classList.toggle('has-sel', !!sel);
+          $$('.ai-ring, .ai-badge', svg).forEach(function (m) { m.classList.toggle('is-sel', m.getAttribute('data-n') === sel); });
+        },
+        marks: function (on) { marksOn = on; svg.classList.toggle('marks-off', !on); return marksOn; }
+      };
     }
-    function section(title, tag) {
-      var s = el('section', 'ai-sec'), h = el('h4', null, title);
-      if (tag) h.appendChild(el('span', 'ai-origin', tag));
-      s.appendChild(h); return s;
-    }
+
     function waSummary(r) {
       return 'Hola, hice la evaluación cosmética en la web. ' + r.summary.join(' ') +
         (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '') + ' Quisiera consultar.';
     }
+    function numChip(o) { var s = el('span', 'ai-num', String(o.n)); s.style.background = EV.CAT[o.category].color; s.setAttribute('aria-hidden', 'true'); return s; }
+    function more(title, cls) { var d = el('details', 'ai-more' + (cls ? ' ' + cls : '')); d.appendChild(el('summary', null, title)); return d; }
+
+    /**
+     * Resultado: título, foto con marcas, resumen breve, qué podemos trabajar, reserva y una sola aclaración.
+     * Lo secundario (respuestas, método, lo no evaluado) va en desplegables. La revisión previa, si hace falta, queda a la vista.
+     */
     function renderReport(r) {
       var out = $('#aiResult'); out.innerHTML = '';
       var ST = EV.ST, seen = r.observations.filter(function (o) { return o.status === ST.SEEN; });
+      var byN = {}; seen.forEach(function (o) { byN[o.n] = o; });
+      out.appendChild(el('h3', 'ai-title', 'Tu piel, de cerca'));
 
-      // A. Tu evaluación cosmética
-      var a = el('section', 'ai-sec ai-sec-head');
-      a.appendChild(el('h3', null, 'Tu evaluación cosmética'));
-      a.appendChild(el('p', 'ai-summary', r.summary.join(' ')));
-      if (r.tendency.note) a.appendChild(el('p', 'ai-note', r.tendency.note));
-      else if (r.tendency.key) a.appendChild(el('p', 'ai-note', 'La tendencia sale de tus respuestas, no de la foto. La confirma la cosmetóloga.'));
-      out.appendChild(a);
-
-      // B. Lo que se observa en tus fotos
-      var b = section('Lo que se observa en tu foto', r.photo === 'analizada' ? 'Foto' : null);
+      // B. Foto con marcas interactivas
       if (r.photo === 'analizada' && photo) {
-        var cards = el('ol', 'ai-cards'), detail = el('p', 'ai-mark-detail'), svg;
-        detail.setAttribute('aria-live', 'polite');
-        var select = function (n, fromMark) {
-          var cur = svg && svg.getAttribute('data-sel');
-          var next = cur === String(n) ? '' : String(n);
-          if (svg) { svg.setAttribute('data-sel', next); svg.classList.toggle('has-sel', !!next); }
-          $$('.ai-area, .ai-badge', svg || out).forEach(function (m) { m.classList.toggle('is-sel', m.getAttribute('data-n') === next); });
-          $$('.ai-card', cards).forEach(function (c) {
-            var on = c.getAttribute('data-n') === next; c.classList.toggle('is-sel', on);
-            $('button', c).setAttribute('aria-expanded', on ? 'true' : 'false'); $('.ai-card-body', c).hidden = !on;
-          });
-          var o = seen.filter(function (x) { return String(x.n) === next; })[0];
-          detail.textContent = o ? o.n + '. ' + o.label + ' (' + o.zone + '): ' + o.description : '';
-          if (o && fromMark) { var c = $('.ai-card[data-n="' + n + '"]', cards); if (c) c.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+        var pinned = null, viewer, detail = el('div', 'ai-detail'), chips = el('ol', 'ai-chips');
+        detail.id = 'aiDetail'; detail.setAttribute('aria-live', 'polite'); detail.hidden = true;
+        var showDetail = function (n) {
+          var o = byN[n]; detail.innerHTML = ''; detail.hidden = !o;
+          viewer.select(o ? n : null);
+          $$('.ai-chip', chips).forEach(function (c) { var on = c.getAttribute('data-n') === String(n); c.classList.toggle('is-sel', on); c.setAttribute('aria-expanded', on ? 'true' : 'false'); });
+          if (!o) return;
+          var h = el('p', 'ai-detail-title'); h.appendChild(numChip(o)); h.appendChild(el('strong', null, o.n + ' · ' + o.label)); detail.appendChild(h);
+          var z = el('p'); z.appendChild(el('strong', null, 'Zona: ')); z.appendChild(document.createTextNode(o.zone + '.')); detail.appendChild(z);
+          detail.appendChild(el('p', null, o.description + ' ' + o.meaning));
+          if (o.consult) { var c = el('p'); c.appendChild(el('strong', null, 'En consulta: ')); c.appendChild(document.createTextNode(o.consult)); detail.appendChild(c); }
         };
+        var pick = function (n) { pinned = pinned === n ? null : n; showDetail(pinned); if (pinned) detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); };
+        viewer = photoViewer(photo, seen, { pick: pick, hover: function (n) { showDetail(n || pinned); } });
+        var bar = el('div', 'ai-photo-bar');
         if (seen.length) {
-          var fig = el('figure', 'ai-photo');
-          svg = photoFigure(photo, seen, select);
-          fig.appendChild(svg);
           var tg = el('button', 'ai-toggle', 'Ocultar marcas'); tg.type = 'button'; tg.setAttribute('aria-pressed', 'true');
           tg.addEventListener('click', function () {
-            var on = tg.getAttribute('aria-pressed') !== 'true';
+            var on = viewer.marks(tg.getAttribute('aria-pressed') !== 'true');
             tg.setAttribute('aria-pressed', on ? 'true' : 'false'); tg.textContent = on ? 'Ocultar marcas' : 'Mostrar marcas';
-            svg.classList.toggle('marks-off', !on);
           });
-          var cap = el('figcaption'); cap.appendChild(el('span', null, 'Tocá un número para ver qué se observó.')); cap.appendChild(tg);
-          fig.appendChild(cap); fig.appendChild(detail); b.appendChild(fig);
+          bar.appendChild(tg);
+        }
+        var again = el('button', 'ai-toggle', 'Repetir foto'); again.type = 'button'; again.addEventListener('click', retakePhoto);
+        bar.appendChild(again);
+        viewer.el.appendChild(bar);
+        out.appendChild(viewer.el);
+        if (r.capture && !r.capture.blocking) out.appendChild(el('p', 'ai-tip', r.capture.text));
+        if (seen.length) {
           seen.forEach(function (o) {
-            var li = el('li', 'ai-card'); li.setAttribute('data-n', o.n);
-            var btn = el('button', 'ai-card-head'); btn.type = 'button'; btn.setAttribute('aria-expanded', 'false');
-            var num = el('span', 'ai-num', String(o.n)); num.style.background = EV.CAT[o.category].color; num.setAttribute('aria-hidden', 'true');
-            btn.appendChild(num);
-            var tt = el('span', 'ai-card-title'); tt.appendChild(el('strong', null, o.label)); tt.appendChild(el('span', 'ai-card-zone', o.zone)); btn.appendChild(tt);
-            btn.addEventListener('click', function () { select(o.n, false); });
-            var body = el('div', 'ai-card-body'); body.hidden = true;
-            body.appendChild(el('p', null, o.description));
-            body.appendChild(el('p', 'ai-limit', o.limitation));
-            li.appendChild(btn); li.appendChild(body); cards.appendChild(li);
+            var li = el('li'), btn = el('button', 'ai-chip'); btn.type = 'button'; btn.setAttribute('data-n', o.n);
+            btn.setAttribute('aria-expanded', 'false'); btn.setAttribute('aria-controls', 'aiDetail');
+            btn.appendChild(numChip(o)); btn.appendChild(el('span', null, o.label)); btn.appendChild(el('span', 'ai-chip-zone', o.zone));
+            btn.addEventListener('click', function () { pick(o.n); });
+            li.appendChild(btn); chips.appendChild(li);
           });
-          b.appendChild(cards);
-        } else b.appendChild(el('p', null, 'En tu foto no se observó nada destacable en lo que se pudo evaluar.'));
-        var notSeen = r.observations.filter(function (o) { return o.status === ST.NOT_SEEN; });
-        if (notSeen.length) {
-          var ns = el('p', 'ai-note');
-          ns.appendChild(el('strong', null, 'No se observó en esta foto: '));
-          ns.appendChild(document.createTextNode(notSeen.map(function (o) { return o.label.toLowerCase(); }).join(', ') + '. Que no se vea en una foto no significa que no exista.'));
-          b.appendChild(ns);
+          out.appendChild(chips); out.appendChild(detail);
         }
-        var na = r.observations.filter(function (o) { return o.status === ST.NA; });
-        if (na.length) {
-          var det = el('details', 'ai-na'), sm = el('summary', null, 'No evaluable en esta foto (' + na.map(function (o) { return o.label.toLowerCase(); }).join(', ') + ')');
-          det.appendChild(sm);
-          var ul = el('ul');
-          na.forEach(function (o) { var li = el('li'); li.appendChild(el('strong', null, o.label + ': ')); li.appendChild(document.createTextNode(o.reason)); ul.appendChild(li); });
-          det.appendChild(ul); b.appendChild(det);
-        }
-      } else b.appendChild(el('p', 'ai-note', 'No sumaste foto: lo que sigue sale de tus respuestas.'));
-      out.appendChild(b);
-
-      // C. Lo que nos contaste (solo cuestionario; nunca genera marcas sobre la foto)
-      if (r.declared.length) {
-        var c = section('Lo que nos contaste', 'Tus respuestas'), ulc = el('ul', 'ai-list');
-        r.declared.forEach(function (d) { ulc.appendChild(el('li', null, d.text)); });
-        c.appendChild(ulc); out.appendChild(c);
+      } else {
+        var add = el('button', 'btn btn-ghost btn-sm ai-addphoto', 'Sumar una foto'); add.type = 'button'; add.addEventListener('click', retakePhoto);
+        out.appendChild(add);
       }
 
-      // D. Qué podemos valorar en tu limpieza facial
-      var d = section('Qué podemos valorar en tu limpieza facial'), uld = el('ul', 'ai-orient');
-      r.orientations.forEach(function (o) {
-        var li = el('li'); li.appendChild(el('strong', null, o.text));
-        li.appendChild(el('span', 'ai-why', 'Por qué: ' + o.because.join(' ')));
-        uld.appendChild(li);
-      });
-      d.appendChild(uld);
-      d.appendChild(el('p', 'ai-note', 'Las técnicas (por ejemplo puntas de diamante, extracción, LED o máscara descongestiva) las elige la ' + EV.PRO + ' en la consulta, según lo que observe y lo que tolere tu piel. Una sesión no cierra poros de forma permanente ni elimina manchas.'));
-      out.appendChild(d);
+      // C. Resumen
+      out.appendChild(el('p', 'ai-summary', r.summary.join(' ')));
 
-      // E. Revisión previa (solo por respuestas concretas)
+      // Revisión previa: a la vista cuando las respuestas lo piden
       if (r.preReview.length) {
         var med = r.preReview.some(function (p) { return p.kind === 'medica'; });
-        var e = el('section', 'ai-sec ai-review-box' + (med ? ' is-medical' : ''));
+        var e = el('section', 'ai-review-box' + (med ? ' is-medical' : ''));
         e.appendChild(el('h4', null, 'Antes de tu sesión'));
         var ule = el('ul', 'ai-list'); r.preReview.forEach(function (p) { ule.appendChild(el('li', null, p.text)); });
         e.appendChild(ule); out.appendChild(e);
       }
 
-      // F. Próximo paso
-      var f = el('section', 'ai-sec ai-next'); f.appendChild(el('h4', null, 'Próximo paso'));
-      var medical = r.preReview.some(function (p) { return p.kind === 'medica'; });
-      f.appendChild(el('p', null, medical
-        ? 'Si reservás, avisá la zona que nos contaste: no se trabaja sobre ella hasta tener la consulta médica. La sesión de 60 minutos empieza con una evaluación de tu piel.'
-        : 'La sesión de 60 minutos con la ' + EV.PRO + ' empieza con una evaluación de tu piel en persona.'));
+      // D. Qué podemos trabajar (hasta tres puntos, cada uno ligado a una marca o a tus respuestas)
+      var d = el('section', 'ai-sec'); d.appendChild(el('h4', null, 'Qué podemos trabajar'));
+      var uld = el('ul', 'ai-work');
+      r.work.forEach(function (w) {
+        var li = el('li'); li.appendChild(el('span', null, w.text));
+        var refs = el('span', 'ai-refs');
+        w.marks.forEach(function (n) { if (byN[n]) { var c = numChip(byN[n]); c.removeAttribute('aria-hidden'); c.setAttribute('aria-label', 'marca ' + n); c.title = byN[n].label; refs.appendChild(c); } });
+        if (!w.marks.length) refs.appendChild(el('span', 'ai-src', 'por tus respuestas'));
+        li.appendChild(refs); uld.appendChild(li);
+      });
+      d.appendChild(uld); out.appendChild(d);
+
+      // E. Reserva
       var acts = el('div', 'ai-actions');
       var cta = el('a', 'btn', 'Reservar evaluación y limpieza facial'); cta.href = '#reservar';
       cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
@@ -1383,19 +1492,42 @@
       var addWa = function () {
         var wa = String(waNumber() || '').replace(/\D/g, '');
         if (!wa || report !== r || $('.btn-wa', acts)) return !!wa;
-        var w = el('a', 'btn btn-wa', 'Abrir WhatsApp con el resumen'); w.target = '_blank'; w.rel = 'noopener';
+        var w = el('a', 'btn btn-wa', 'Consultar por WhatsApp'); w.target = '_blank'; w.rel = 'noopener';
         w.href = 'https://wa.me/' + wa + '?text=' + encodeURIComponent(waSummary(r));
         w.addEventListener('click', function () { Track.send('analisis_whatsapp', { dedupeKey: 'analisis_whatsapp:' + PAGE_LOADED_AT }); });
         acts.appendChild(w); return true;
       };
       if (!addWa()) document.addEventListener('cc:whatsapp', addWa, { once: true });
-      f.appendChild(acts);
-      if (session && session.requestId) f.appendChild(shareBox(r));
-      var again = el('button', 'link-btn', 'Volver a empezar (borra la foto y las respuestas)'); again.type = 'button';
-      again.addEventListener('click', restartAll);
-      f.appendChild(again);
-      out.appendChild(f);
+      out.appendChild(acts);
 
+      // Información secundaria
+      var ans = more('Ver mis respuestas'), ula = el('ul', 'ai-list');
+      if (r.tendency.key) ula.appendChild(el('li', null, 'Tendencia orientativa por tus respuestas: ' + EV.TENDENCY_LABEL[r.tendency.key] + '.'));
+      r.declared.forEach(function (x) { ula.appendChild(el('li', null, x.text)); });
+      if (!ula.children.length) ula.appendChild(el('li', null, 'No hay respuestas para mostrar.'));
+      ans.appendChild(ula); out.appendChild(ans);
+
+      var about = more('Sobre este análisis');
+      about.appendChild(el('p', null, r.photo === 'analizada'
+        ? 'La foto se analiza en tu teléfono: se ubican los puntos de tu cara y se miden reflejos, contraste y color por zona. Cada marca sale de esas mediciones. Tus respuestas no generan marcas.'
+        : 'Sin foto, la orientación sale de tus respuestas.'));
+      var photoNA = r.observations.filter(function (o) { return o.status === ST.NA && o.naKind !== EV.NA_KIND.DETECTOR; });
+      var detNA = r.observations.filter(function (o) { return o.status === ST.NA && o.naKind === EV.NA_KIND.DETECTOR; });
+      if (photoNA.length) {
+        var ul2 = el('ul', 'ai-list');
+        photoNA.forEach(function (o) { var li = el('li'); li.appendChild(el('strong', null, o.label + ': ')); li.appendChild(document.createTextNode(o.reason)); ul2.appendChild(li); });
+        about.appendChild(el('p', 'ai-more-h', 'No se pudo evaluar en esta foto')); about.appendChild(ul2);
+      }
+      if (detNA.length) about.appendChild(el('p', null, detNA.map(function (o) { return o.reason; }).join(' ')));
+      about.appendChild(el('p', null, 'Las técnicas las elige la ' + EV.PRO + ' en la consulta, según lo que observe y lo que tolere tu piel.'));
+      out.appendChild(about);
+
+      if (session && session.requestId) { var sh = more('Enviar este resumen a la profesional'); sh.appendChild(shareBox(r)); out.appendChild(sh); }
+
+      var restart = el('button', 'link-btn ai-restart', 'Volver a empezar (borra la foto y las respuestas)'); restart.type = 'button';
+      restart.addEventListener('click', restartAll); out.appendChild(restart);
+
+      // F. Aclaración única
       out.appendChild(el('p', 'ai-disclaimer', r.disclaimer));
       show('resultado'); out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1403,7 +1535,6 @@
     /** Envío opcional del resumen a la profesional: consentimiento aparte, solo texto (nunca la foto). */
     function shareBox(r) {
       var box = el('div', 'ai-share');
-      box.appendChild(el('p', 'ai-share-title', 'Enviar este resumen a la profesional (opcional)'));
       box.appendChild(el('p', 'ai-note', 'Así la ' + EV.PRO + ' lo puede leer antes de tu sesión. Se envía el texto de este resultado, no la foto, y queda guardado con tus datos de contacto en la planilla de la clínica. No se usa para otra cosa.'));
       var fld = el('div', 'field check'), cb = document.createElement('input'), lb = el('label', null, 'Acepto enviar este resumen a la profesional.');
       cb.type = 'checkbox'; cb.id = 'aiShareOk'; lb.htmlFor = 'aiShareOk'; fld.appendChild(cb); fld.appendChild(lb); box.appendChild(fld);
@@ -1413,7 +1544,7 @@
         if (!cb.checked) { status(st, 'Marcá la casilla si querés enviarlo.', 'error'); return; }
         setBusy(btn, true, 'Enviando…');
         var body = { requestId: session.requestId, token: session.token, adult: true, share: true, report: EV.compactReport(r) };
-        if (photo && photo.measures) body.metrics = photo.measures.raw; // números de la foto, para calibrar (no la imagen)
+        if (photo && photo.measures) body.metrics = photo.measures.raw; // números generales de la foto, para calibrar (no la imagen ni las ubicaciones)
         api('saveReport', body, 20000).then(function (res) {
           setBusy(btn, false, 'Enviar resumen');
           if (res && res.ok) { status(st, 'Listo: la profesional lo va a poder leer antes de tu sesión.', 'ok'); btn.disabled = true; cb.disabled = true; Track.send('analisis_resumen_enviado', { dedupeKey: 'analisis_resumen:' + PAGE_LOADED_AT }); return; }
