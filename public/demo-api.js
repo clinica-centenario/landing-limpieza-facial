@@ -2,7 +2,7 @@
  * API SIMULADA — solo para revisar la experiencia en local (?demo=1 en localhost).
  * No guarda nada, no toca Google y la página muestra un aviso permanente de MODO DEMO.
  * No se incluye en producción: app.js solo la usa si API_URL está vacío y el host es local.
- * Parámetros de prueba: &conflict=1 (el primer intento de reserva choca) · &empty=1 (sin horarios) · &wa=59899123456 (WhatsApp)
+ * Parámetros de prueba: &conflict=1 (el primer intento de reserva choca) · &empty=1 (sin horarios) · &wa=59899123456 (WhatsApp) · &savefail=1 (falla el envío del resumen)
  */
 (function () {
   var q = new URLSearchParams(location.search);
@@ -47,35 +47,19 @@
       if (b.action === 'lead') {
         var id = 'CC-DEMO-' + Math.random().toString(16).slice(2, 8).toUpperCase();
         leads[id] = true;
-        return delay({ ok: true, requestId: id, token: 'demo', leadEventId: 'lead_' + id }, 700);
+        return delay({ ok: true, requestId: id, token: 'demo', leadEventId: 'lead_' + id, whatsapp: q.get('wa') || '' }, 700);
       }
       if (b.action === 'availability') {
         var r = recommend(b.page || 0);
         return delay({ ok: true, page: b.page || 0, slots: r.slots, hasMore: r.hasMore, withinHours: 24, durationMin: 60, whatsapp: q.get('wa') || '', timezone: 'America/Montevideo' }, 600);
       }
       if (b.action === 'track') return delay({ ok: true }, 50);
-      if (b.action === 'analyze') {
-        // Vista previa: el servidor no se usa. Perfil fijo de ejemplo; la foto usa lo medido en el teléfono.
-        var Q = 'cuestionario', F = 'foto', V = 'evaluación presencial', ph = b.photo, has = function (k) { return ph && ph.findings.indexOf(k) >= 0; };
-        var TXT = { brillo_zona_t: 'Brillo concentrado en frente y nariz.', brillo_general: 'Brillo repartido en varias zonas del rostro.',
-          textura_irregular: 'Textura irregular en las mejillas.', tono_desparejo: 'Tono desparejo en las mejillas.', enrojecimiento_visible: 'Mejillas más rojizas que la frente.',
-          puntos_negros_posibles: 'Posibles puntos negros en la nariz', poros_visibles_posibles: 'Poros visibles en las mejillas, cerca de la nariz.',
-          granos_posibles: 'Posibles granos o zonas inflamadas', milium_posible: 'Posibles quistes de milium (puntitos blancos) cerca de los ojos o en los pómulos',
-          lunares_visibles: 'Lunares visibles', manchas_posibles: 'Posibles manchas o zonas más oscuras' };
-        var CNT = { puntos_negros_posibles: 'puntosNegros', granos_posibles: 'granos', milium_posible: 'milium', lunares_visibles: 'lunares', manchas_posibles: 'manchas' };
-        var txt = function (k) { return CNT[k] ? TXT[k] + (ph.metrics[CNT[k]] ? ' (' + ph.metrics[CNT[k]] + ')' : '') + '.' : TXT[k]; };
-        return delay({ ok: true, status: 'ok', example: true, rulesVersion: 'v3-2026-11', photo: ph ? 'analizada' : 'sin_foto', whatsapp: q.get('wa') || '',
-          photoLimits: ph ? 'Son mediciones de tus fotos: la luz, la cámara y la hora del día pueden cambiarlas. La profesional lo confirma en persona.' : '',
-          profile: { type: 'Mixta', warning: '', origin: ph ? 'foto y cuestionario' : Q, rule: 'TIPO-04' },
-          needs: [{ text: 'Posible sensibilidad: a veces tu piel reacciona con algunos productos.', origin: Q, rule: 'NEC-SENS-2' }],
-          observations: ph ? ph.findings.map(function (k) { return { text: txt(k), origin: F, rule: 'OBS-' + k, beta: !!CNT[k] || /_posibles?$|_visibles$/.test(k) }; }) : [],
-          benefits: [{ text: 'Despejar los puntos negros que la profesional considere aptos para extracción.', origin: Q, rule: 'BEN-PN' },
-                     { text: 'Sensación de piel más limpia y con menos brillo después de la sesión. El brillo vuelve con los días.', origin: has('brillo_zona_t') || has('brillo_general') ? F : Q, rule: 'BEN-BRI' },
-                     { text: 'Piel más suave al tacto.', origin: has('textura_irregular') ? F : Q, rule: 'BEN-TEX' }],
-          limits: [{ text: 'Una sesión no cierra poros de forma permanente, no borra marcas ni resuelve imperfecciones de fondo. El resultado depende de tu piel y de lo que defina la profesional.', origin: V, rule: 'LIM-1' }],
-          toEvaluate: [{ text: 'Usás exfoliantes o retinoides: la profesional lo tiene en cuenta para decidir qué se puede hacer en esta sesión.', origin: Q, rule: 'EVA-EXF' }],
-          tips: [{ text: 'Lavá tu cara con suavidad, a la mañana y a la noche.', origin: Q, rule: 'TIP-1' }, { text: 'Usá protector solar todos los días.', origin: Q, rule: 'TIP-2' },
-                 { text: 'Probá un producto nuevo por vez.', origin: Q, rule: 'TIP-SENS' }] }, 900);
+      if (b.action === 'saveReport') {
+        // Vista previa: no se guarda nada. Igual que el servidor, exige consentimiento y rechaza imágenes.
+        if (b.share !== true || b.adult !== true) return delay({ ok: false, code: 'consent_required' }, 300);
+        if (b.image || b.photo) return delay({ ok: false, code: 'invalid_request' }, 300);
+        if (q.get('savefail') === '1') return delay({ ok: false, code: 'network' }, 600);
+        return delay({ ok: true, status: 'saved' }, 600);
       }
       if (b.action === 'book') {
         if (conflictOnce) {

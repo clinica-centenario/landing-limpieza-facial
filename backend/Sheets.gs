@@ -308,13 +308,17 @@ function hasPriorBooking_(cfg, requestId, email, phone) {
  * Guarda el resultado de la orientación (nunca la foto ni las respuestas del cuestionario).
  * Cada conclusión queda con su origen y la regla que la produjo: "texto [origen · regla]".
  */
-function appendAnalysis_(cfg, contact, result) {
+/**
+ * Resumen enviado por la persona (con su consentimiento) a la profesional. Usa las columnas existentes:
+ * tendencia, lo que contó, lo observado en la foto, qué valorar, revisión previa. Nunca la foto.
+ */
+function appendAnalysis_(cfg, contact, report, metrics) {
   var sh = openSS_(cfg).getSheetByName(TAB_ANALYSIS);
   var idx = headerIndex_(sh);
   var row = new Array(Object.keys(idx).length).fill('');
   var set = function (k, v) { if (k in idx) row[idx[k]] = sheetSafe_(v); };
   var clean = function (v) { return String(v == null ? '' : v).replace(/^'/, ''); };
-  var list = function (items) { return (items || []).map(function (i) { return i.text + ' [' + i.origin + ' · ' + i.rule + ']'; }).join(' | '); };
+  var STATUS_TXT = { observado: 'Se observa', no_observado: 'No se observa', no_evaluable: 'No evaluable' };
   var id = 'AP-' + Utilities.getUuid().replace(/-/g, '').slice(0, 10).toUpperCase();
   set('ID análisis', id);
   set('Fecha', nowLocal_(cfg));
@@ -323,16 +327,17 @@ function appendAnalysis_(cfg, contact, result) {
   set('Apellido', clean(contact['Apellido']));
   set('Celular', clean(contact['Celular']));
   set('Email', clean(contact['Email']));
-  var p = result.profile;
-  set('Tipo de piel (orientativo)', p.type + (p.warning ? ' (con aviso)' : '') + ' [' + p.origin + ' · ' + p.rule + ']');
-  set('Necesidades referidas', list(result.needs));
-  set('Observaciones de la foto', list(result.observations));
-  set('Beneficios posibles', list(result.benefits));
-  set('Para evaluar en consulta', list(result.toEvaluate));
-  set('Cuidados básicos', list(result.tips));
-  set('Foto', result.photo === 'analizada' ? 'Medida en el teléfono (no enviada ni guardada)' : 'Sin foto');
-  if (result.photoMetrics) set('Mediciones de la foto', JSON.stringify(result.photoMetrics));
-  set('Versión de reglas', result.rulesVersion);
+  set('Tipo de piel (orientativo)', 'Tendencia ' + report.tendency + ' [cuestionario]');
+  set('Necesidades referidas', report.declared.join(' | '));
+  set('Observaciones de la foto', report.observations.map(function (o) {
+    return o.category + ': ' + STATUS_TXT[o.status] + (o.text ? ' (' + o.text + ')' : '');
+  }).join(' | '));
+  set('Beneficios posibles', report.orientations.join(' | '));
+  set('Para evaluar en consulta', report.preReview.join(' | '));
+  set('Cuidados básicos', '');
+  set('Foto', report.photo === 'analizada' ? 'Analizada en el teléfono (no enviada ni guardada)' : 'Sin foto');
+  if (metrics) set('Mediciones de la foto', JSON.stringify(metrics));
+  set('Versión de reglas', report.version);
   set('Reservó', 'No');
   set('Entorno', cfg.ENV);
   sh.appendRow(row);

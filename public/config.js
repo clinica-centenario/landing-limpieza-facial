@@ -43,8 +43,9 @@ window.CC_CONFIG = {
   // Canal para ejercer derechos sobre datos personales (Ley 18.331). PENDIENTE.
   PRIVACY_CONTACT: '',
 
-  // Orientación para tu piel (cuestionario + foto analizada en el teléfono, sin servicios externos).
-  // false = la sección no se muestra. Pide los datos antes de la foto y guarda el resultado en la pestaña "Análisis de piel".
+  // Evaluación cosmética (foto analizada en el teléfono + cuestionario; reglas en evaluation.js).
+  // false = la sección no se muestra. Pide los datos de contacto antes del informe; el resumen solo se guarda
+  // (pestaña "Análisis de piel") si la persona marca la casilla para enviarlo a la profesional.
   AI_ANALYSIS_ENABLED: true,
 
   // Reseñas reales. Vacío = el bloque NO se muestra. Formato: { text, author, date }

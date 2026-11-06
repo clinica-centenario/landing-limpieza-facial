@@ -22,7 +22,7 @@ function doPost(e) {
       case 'availability': return json_(handleAvailability_(cfg, body, now));
       case 'book': return json_(handleBook_(cfg, body, now));
       case 'track': return json_(handleTrack_(cfg, body));
-      case 'analyze': return json_(handleAnalyze_(cfg, body));
+      case 'saveReport': return json_(handleSaveReport_(cfg, body));
       default: return json_(fail_('invalid_request'));
     }
   } catch (err) {
@@ -86,7 +86,7 @@ function handleLead_(cfg, body, now) {
   var res = appendContact_(cfg, rec); // lanza si no quedó escrito → server_error, sin éxito falso
   logEvent_(cfg, requestId, 'datos_recibidos', { previas: res.previous, utm_source: rec.utm.utm_source || '' });
 
-  var out = { ok: true, requestId: requestId, token: leadToken_(requestId), leadEventId: 'lead_' + requestId };
+  var out = { ok: true, requestId: requestId, token: leadToken_(requestId), leadEventId: 'lead_' + requestId, whatsapp: cfg.WHATSAPP_NUMBER || '' };
   if (submitKey) cache.put('sub:' + submitKey, JSON.stringify(out), 1800);
   if (body.trackingConsent === true) sendCapi_(cfg, 'Lead', out.leadEventId, rec.pageUrl, body, { email: email, phone: phone });
   return out;

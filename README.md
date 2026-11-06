@@ -13,7 +13,8 @@ Flujo: **datos (nombre, apellido, celular, correo) → guardado en la planilla "
 public/                 ← lo que se sube al sitio (estático, sin build)
   index.html            contenido, SEO y datos estructurados
   styles.css            identidad tomada de clinicacentenario.com.uy/alquiler-consultorio
-  app.js                formulario, agenda, confirmación, medición
+  app.js                formulario, agenda, confirmación, medición, cámara y foto
+  evaluation.js         reglas de la evaluación cosmética (informe, sin red ni página)
   config.js             ★ configuración pública (sin secretos)
   photos.js             generado por tools/process_photos.py
   demo-api.js           API simulada, solo localhost + ?demo=1 (no subir a producción)
@@ -21,18 +22,20 @@ public/                 ← lo que se sube al sitio (estático, sin build)
   media/                videos H.264 sin audio ni metadatos + portadas
 backend/                ← Apps Script vinculado a la planilla "Datos Landing" (cuenta ccentenario3090@gmail.com)
   Config.gs             ★ parámetros operativos (sobrescribibles por Propiedades del script)
-  Code.gs               endpoints: lead · availability · book · track
+  Code.gs               endpoints: lead · availability · book · track · saveReport
   Availability.gs       cruce profesional × consultorios, zona horaria
   Booking.gs            confirmación: lock, idempotencia, revalidación, rollback
   Sheets.gs             planilla: Contactos, Eventos, Configuración, Conciliación
   Security.gs           validación, anti-fórmulas, tokens, antispam
-  Analysis.gs           análisis de piel con IA (orientación cosmética, no diagnóstico)
+  Analysis.gs           guarda el resumen de la evaluación cosmética (solo con consentimiento aparte)
   Capi.gs               Meta Conversions API (opcional)
   Setup.gs              configurarTodo · setupSecrets · setupSheet · setupRoomCalendar · checkCalendars · cleanupTestEvents
   appsscript.json       manifiesto (servicio avanzado Calendar v3 y permisos mínimos)
 tests/
   backend.test.js       25 pruebas del backend real con Google simulado (node --test)
-  analysis.test.js      8 pruebas del análisis con IA (filtros, menores, topes, privacidad)
+  analysis.test.js      7 pruebas del guardado del resumen (consentimiento, filtros, privacidad)
+  evaluation.test.js    17 pruebas de las reglas del informe (public/evaluation.js)
+  e2e_orientacion.py    recorrido de la evaluación en Chrome móvil (cámara simulada, rechazos, fallas)
   e2e_mobile.py         31 verificaciones del front en Chromium móvil
 tools/process_photos.py revelado de RAW y exportación web
 ```
@@ -91,7 +94,7 @@ Está en el Drive de ccentenario3090@gmail.com. El script la completa con `setup
 - **Horarios:** días y franjas en que se puede reservar. La carga el equipo cuando la Lic. Mansilla avisa su disponibilidad.
 - **Días cerrados:** feriados o licencias (AAAA-MM-DD o DD/MM/AAAA).
 - **Configuración:** duración, intervalo, anticipación, horizonte, ventana y cantidad de recomendaciones, márgenes y WhatsApp. El script lee la columna *Clave*; no cambiarla.
-- **Análisis de piel:** reservada para la etapa del análisis con IA (resultado, nunca la foto).
+- **Análisis de piel:** resúmenes que la persona eligió enviar a la profesional (texto, nunca la foto).
 - **Eventos:** datos_recibidos, vio_horarios, eligio_horario, horario_ocupado_al_confirmar, conflicto_detectado_post_escritura, reserva_confirmada, errores.
 - **Conciliación:** casos que requieren revisión manual.
 
@@ -125,28 +128,31 @@ Todo con la cuenta **ccentenario3090@gmail.com**. Nunca compartas contraseñas n
 
 **Calendario de la profesional (opcional):** hoy no se usa; la disponibilidad la carga el equipo en Horarios. Si más adelante se quiere cruzar y escribir también en su calendario, cargar `PRO_CALENDAR_ID` en Propiedades del script.
 
-## 7 bis. Evaluá tu cara con IA
+## 7 bis. Evaluá tu cara con IA (evaluación cosmética orientativa)
 
-Recorrido: botón "Evaluá tu cara con IA" en la portada → introducción (18+) → **cámara guiada** con óvalo: foto de frente, de un costado y del otro, con captura automática cuando la cara está centrada, quieta, nítida y con buena luz (alternativas: subir una foto o hacerlo sin fotos) → **4 preguntas** (5 sin fotos) → datos de contacto → resultado → WhatsApp o reserva.
+Recorrido: botón "Evaluá tu cara con IA" → introducción (18+, consejos de luz y qué pasa con la foto) → **una foto de frente** con cámara guiada y captura automática (alternativas: subir una foto o seguir sin foto) → **revisión de la foto** (usar o repetir, con los problemas concretos) → **preguntas en 7 u 8 pasos cortos** → datos de contacto → informe → reserva, WhatsApp o envío opcional del resumen a la profesional.
+
+**Qué analiza la foto, sin exagerar:** MediaPipe Face Landmarker (red neuronal, Apache-2.0) **solo ubica el rostro y sus 478 puntos**; no reconoce alteraciones de la piel. Todo lo demás son **mediciones de imagen** hechas en el teléfono, con **umbrales provisorios sin validación clínica**: reflejos de luz (brillo), energía de bordes finos (textura), variación de color descontando la luz gradual (tono), rojo relativo mejillas/frente (enrojecimiento) y contraste local en la nariz (puntitos oscuros). Por eso el informe **no muestra conteos, puntajes ni porcentajes**, marca **zonas** y no puntos, y declara "no evaluable" cuando la foto no alcanza.
 
 | Pieza | Dónde | Qué hace |
 |---|---|---|
-| Cámara guiada | `public/app.js` (`CAM_RULES`) | MediaPipe Face Landmarker en modo video (el modelo Apache-2.0 que incluye UniFace): posición y tamaño en el óvalo, giro e inclinación, luz; mensajes guía y captura automática |
-| Control técnico | `PHOTO_RULES` | Un solo rostro, encuadre, nitidez, exposición (recortes y contraste, no brillo promedio). **No detecta maquillaje ni filtros** |
-| Elementos puntuales (en prueba) | `SPOT_RULES`, `detectSpots` | Máscara de piel con la malla (sin ojos, cejas, labios ni fosas nasales); cada punto se compara con la piel que lo rodea en CIELab y se agrupa por tamaño (en mm), forma y contraste: **granos** (zonas rojas redondeadas), **puntos negros** (nariz), **milium** (puntitos claros en pómulos), **lunares** (chicos, redondos y oscuros) y **manchas** (más grandes y de bordes suaves). Se descartan formas alargadas (pliegues, arrugas) y la zona de ojeras para manchas y lunares. Cada marca se dibuja donde se detectó |
-| Indicadores de piel | `SKIN_RULES`, `measureSkin` | Zona T contra mejillas (de frente) y la mejilla visible en cada costado: brillo, textura, tono (descontando la luz gradual), rojez relativa (sin reflejos) y, **en prueba**, puntos oscuros en la nariz y poros. Umbrales provisorios |
-| Preguntas | `QUIZ` | Tirantez o descamación, reactividad, qué quiere mejorar (hasta 2), qué aplica ahora (exfoliantes o retinoides, procedimiento reciente, lesiones). Sin fotos se suma el brillo |
-| Reglas | `backend/Orientation.gs` (`v2-2026-11`) | Tipo de piel con el brillo medido en las fotos y la sequedad de las respuestas (si se contradicen: el más probable con aviso); lo identificado; beneficios; "para ver en la consulta"; cuidados básicos. Cada conclusión con origen y regla |
-| Resultado | `public/app.js` | Tipo de piel, lo identificado (con "análisis en prueba" donde corresponde), dibujo de las zonas medidas sobre la foto de frente, botón "Recibir mi resultado por WhatsApp" (chat con la clínica con el resumen) y reserva |
-| Registro | Pestaña "Análisis de piel" | Resultado con fundamento, versión de reglas y números medidos. **No se guardan las fotos ni las respuestas** |
+| Reglas del informe | `public/evaluation.js` (`v4-2026-11`, probado con `tests/evaluation.test.js`) | Categorías, cuestionario, observaciones por categoría (observado / no observado / no evaluable), tendencia, orientaciones con su motivo, revisión previa, resumen y validación de la salida (sin diagnósticos, conteos ni porcentajes) |
+| Cámara y foto | `public/app.js` (`CAM_RULES`, `PHOTO_RULES`) | Guía en el óvalo, un solo rostro, encuadre, giro, inclinación, nitidez, exposición (recortes y contraste, no brillo promedio). **No detecta maquillaje ni filtros: se pregunta** |
+| Controles por zona | `occlusionOf`, `analyzeFront` | Zona tapada o con sombra (pelo, mano, anteojos), luz de costado y detalle disponible (px por mm). Solo vuelven una categoría "no evaluable" |
+| Categorías | `observePhoto` | Brillo visible, aspecto de textura irregular, puntitos oscuros para revisar, enrojecimiento visible y zonas de tono desigual. **Poros, puntos claros y descamación: siempre "no evaluable"** (una selfie no tiene el detalle; los reflejos se confunden con puntos claros) |
+| Puntuales (solo diagnóstico) | `SPOT_RULES`, `detectSpots` | Granos, puntos negros, milium, lunares y manchas por contraste local. **Ocultos al público** hasta validarlos; con `?diagnostico=1` se ven sus números |
+| Cuestionario | `QUIZ` en `evaluation.js` | Qué tenía en la cara (y filtro si subió la foto), dónde y cuándo aparece el brillo, tirantez, descamación, reacción a productos, rutina, objetivo principal, productos o procedimientos recientes, y 5 preguntas de seguridad separadas (heridas, irritación intensa, dolor, sangrado, cambios o heridas que no cicatrizan). Nada viene marcado; "No sé" nunca cuenta como "No" |
+| Informe | `renderReport` | A. Tu evaluación cosmética (2-3 frases con sus datos) · B. Lo que se observa (foto interactiva + tarjetas; "no se observó" y "no evaluable" aparte) · C. Lo que nos contaste · D. Qué podemos valorar (cada punto con su "por qué") · E. Antes de tu sesión (solo si corresponde) · F. Próximo paso. Una sola aclaración general |
+| Marcas | `photoFigure` | Un SVG con la foto y las zonas en las mismas coordenadas (alineadas al cambiar tamaño u orientación); recorte = viewBox, espejo = transformación; la foto original no se modifica. Número + color, activar/desactivar, selección sincronizada con la tarjeta |
+| Envío a la profesional | acción `saveReport` (`backend/Analysis.gs`) | Opcional, con casilla aparte. Solo texto (nunca la foto) y números de la foto para calibrar, en la pestaña "Análisis de piel" |
 
-**Decisiones de la clínica:** no se recomiendan productos, técnicas ni tratamientos; no se deriva a otros profesionales, lo complejo queda "para ver con la profesional en la consulta"; los beneficios se basan en lo que se encontró; los cuidados son básicos y cortos.
+**Reglas de contenido:** la tendencia seca/grasa/mixta sale de las respuestas, con su incertidumbre (el brillo de la foto no la cambia); la sensibilidad es una característica declarada; el cuestionario nunca genera marcas y solo puede restar evaluabilidad (maquillaje, crema, filtro); no se asignan técnicas (las elige la Lic. Jaqueline Mansilla en la consulta); no se prometen resultados; lesión que sangra, cambia o no cicatriza → consulta médica antes de tratar esa zona.
 
-**Resguardos:** **la foto nunca sale del teléfono** (el servidor rechaza cualquier imagen); al servidor llegan solo categorías cerradas y números acotados; no se usa ningún proveedor externo de IA, reconocimiento de identidad ni estimación de edad, género, etnia o emoción; analítica solo con hitos del recorrido (`analisis_inicio`, `analisis_cuestionario_completo`, `analisis_foto_aceptada/rechazada`, `analisis_resultado`, `analisis_clic_reserva`), sin respuestas ni hallazgos.
+**Privacidad:** la foto se analiza en el teléfono y no se envía ni se guarda (el servidor rechaza imágenes); se borra de la memoria al salir o al tocar "Volver a empezar". Las respuestas no se envían salvo que la persona marque la casilla para mandar el resumen. No se usan para entrenar. Analítica solo con hitos (`analisis_inicio`, `analisis_foto_lista/aceptada/rechazada`, `analisis_cuestionario_completo`, `analisis_resultado`, `analisis_clic_reserva`, `analisis_whatsapp`, `analisis_resumen_enviado`), sin contenido. El navegador descarga el modelo de jsDelivr y Google; la imagen no se les envía.
 
-**Descartados:** SPOTSCAN+ (La Roche-Posay/ModiFace) no tiene API pública; solo se toma como referencia de recorrido. DeepFace no aporta nada para piel y sus funciones propias (identidad, edad, género, emoción, raza) están excluidas. De UniFace se usan solo los modelos con licencia comercial (los de MediaPipe); SCRFD y 2d106det no se pueden usar comercialmente y BiSeNet tiene la licencia de origen sin aclarar.
+**Descartados:** SPOTSCAN+ (La Roche-Posay/ModiFace) no tiene API pública. DeepFace no aporta nada para piel y sus funciones (identidad, edad, género, emoción, raza) están excluidas. SCRFD y 2d106det no se pueden usar comercialmente y BiSeNet tiene la licencia de origen sin aclarar.
 
-**Pruebas en teléfonos:** abrir la landing con `?diagnostico=1`. Debajo de la foto aparecen los números de los controles y de los indicadores; también quedan en la columna "Mediciones de la foto". Con varios casos reales (tonos de piel, teléfonos, luces) se ajustan `PHOTO_RULES` y `SKIN_RULES`.
+**Pruebas en teléfonos:** abrir la landing con `?diagnostico=1`. En la revisión de la foto aparecen los números de los controles, de las zonas y de las mediciones (también quedan en "Mediciones de la foto" cuando la persona envía su resumen). Con varios casos reales (tonos de piel, teléfonos, luces) revisados por la profesional se ajustan `PHOTO_RULES` (app.js) y `SKIN_RULES` (evaluation.js). Hasta entonces, los umbrales son provisorios.
 
 **Pruebas automáticas:** `tests/analysis.test.js` (reglas, contradicciones, respuestas incompletas, filtros, privacidad) y `tests/e2e_orientacion.py` (recorrido completo y controles de foto a partir de una selfie de prueba).
 
@@ -167,7 +173,7 @@ Recorrido: botón "Evaluá tu cara con IA" en la portada → introducción (18+)
 ## 9. Pruebas
 
 ```bash
-node --test tests/backend.test.js tests/analysis.test.js   # backend (31 + 8)
+node --test tests/backend.test.js tests/analysis.test.js tests/evaluation.test.js   # backend y reglas (56)
 pip install playwright && python3 -I tests/e2e_mobile.py public /tmp/capturas   # front móvil (35), usa Google Chrome o CHROME_PATH
 ```
 

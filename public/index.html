@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Poppins:wght@600;700&display=swap" rel="stylesheet">
   <link rel="preload" as="image" type="image/avif" imagesrcset="img/hero-480.avif 480w, img/hero-800.avif 800w, img/hero-1080.avif 1080w" imagesizes="(min-width: 900px) 520px, 100vw" fetchpriority="high">
-  <link rel="stylesheet" href="styles.css?v=20261102d">
+  <link rel="stylesheet" href="styles.css?v=20261106a">
 
   <script type="application/ld+json">
   {
@@ -101,7 +101,7 @@
           <a class="btn btn-lg" href="#reservar" data-cta="hero">Ver disponibilidad</a>
           <p class="micro"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Completás tus datos y elegís entre horarios reales.</p>
           <a class="btn btn-lg btn-ai" href="#analisis" id="aiHeroLink" data-cta="hero-ia" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3.5 13.8 9l5.7.2-4.5 3.5 1.6 5.5-4.6-3.2-4.6 3.2 1.6-5.5-4.5-3.5L10.2 9z"/></svg>Evaluá tu cara con IA</a>
-          <p class="micro ai-micro" id="aiHeroMicro" hidden>Gratis, en un minuto, desde tu celular. Las fotos no salen de tu teléfono.</p>
+          <p class="micro ai-micro" id="aiHeroMicro" hidden>Gratis, en dos minutos, desde tu celular. La foto no sale de tu teléfono.</p>
         </div>
 
         <figure class="hero-media" data-photo-slot="hero">
@@ -146,33 +146,43 @@
         <div class="ai-copy">
           <p class="eyebrow">Evaluación con IA</p>
           <h2 id="ia-t">Evaluá tu cara con IA</h2>
-          <p>Te guiamos para sacar tres fotos (de frente y de cada lado), respondés 4 preguntas y te mostramos qué tipo de piel parece que tenés y qué identificamos en ella. La profesional lo confirma en la consulta.</p>
+          <p>Te guiamos para sacar una foto de frente y respondés unas preguntas breves. Recibís una orientación cosmética: lo que se observa en la foto, lo que nos contaste y qué se puede valorar en tu limpieza facial.</p>
           <ul class="checks ai-tips">
-            <li>Un minuto, desde tu celular.</li>
-            <li>Las fotos se analizan en tu teléfono: no se envían ni se guardan.</li>
-            <li>Recibís tu resultado y lo podés mandar por WhatsApp.</li>
+            <li>Unos dos minutos, desde tu celular.</li>
+            <li>La foto se analiza en tu teléfono: no se envía ni se guarda.</li>
+            <li>No es un diagnóstico: la cosmetóloga confirma todo en la consulta.</li>
           </ul>
-          <p class="ai-disclaimer">Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.</p>
         </div>
 
         <div class="card ai-tool" aria-live="polite">
           <!-- 1. Introducción -->
           <div data-ai="intro">
             <p class="ai-step">Antes de empezar</p>
-            <p>Vamos a usar la cámara de tu teléfono. Buscá un lugar con luz pareja de frente (por ejemplo, mirando a una ventana), sin maquillaje si podés, y sacate anteojos y flequillo de la cara.</p>
+            <p class="ai-lead">Una foto de frente y 7 pasos de preguntas. Para que la foto sirva:</p>
+            <ul class="ai-photo-tips">
+              <li>Luz pareja de frente, por ejemplo mirando a una ventana. Sin contraluz ni sol directo.</li>
+              <li>Cara lavada, sin maquillaje y sin filtros ni modo belleza.</li>
+              <li>Sin anteojos y con el pelo hacia atrás.</li>
+              <li>Celular a la altura de los ojos y quieto: apoyá los codos.</li>
+            </ul>
+            <details class="ai-privacy">
+              <summary>Qué pasa con tu foto y tus respuestas</summary>
+              <p>La foto se analiza dentro de tu teléfono. No se envía a ningún servidor ni se guarda, y se borra al salir de la página o al tocar «Volver a empezar». Para ubicar los puntos de tu rostro, el navegador descarga un modelo de Google (MediaPipe); la imagen no sale del teléfono.</p>
+              <p>Tus respuestas tampoco se envían. Al final podés elegir mandar el resumen escrito a la profesional; es opcional y nunca incluye la foto. No usamos fotos ni respuestas para entrenar sistemas.</p>
+            </details>
             <div class="field check">
               <input id="aiAdult" type="checkbox">
               <label for="aiAdult">Tengo 18 años o más.</label>
             </div>
             <button type="button" class="btn btn-block" id="aiStart">Abrir la cámara</button>
             <button type="button" class="link-btn" id="aiUploadStart">Prefiero subir una foto</button>
-            <button type="button" class="link-btn" id="aiNoPhoto">Hacerlo sin fotos</button>
+            <button type="button" class="link-btn" id="aiNoPhoto">Hacerlo sin foto</button>
             <p class="form-status" id="aiIntroStatus" role="status"></p>
           </div>
 
-          <!-- 2. Cámara guiada -->
+          <!-- 2. Cámara guiada: una foto de frente -->
           <div data-ai="camara" hidden>
-            <p class="ai-step" id="aiCamStep">Foto 1 de 3 · De frente</p>
+            <p class="ai-step">Foto de frente</p>
             <div class="ai-cam" id="aiCam">
               <video id="aiVideo" playsinline muted autoplay></video>
               <svg class="ai-cam-guide" viewBox="0 0 100 133" preserveAspectRatio="none" aria-hidden="true">
@@ -180,26 +190,39 @@
                 <rect width="100" height="133" fill="rgba(20,24,14,.55)" mask="url(#aiHole)"/>
                 <ellipse id="aiRing" cx="50" cy="60" rx="31" ry="41" fill="none" stroke="#fff" stroke-width="1.2" stroke-dasharray="3 2"/>
               </svg>
-              <p class="ai-cam-msg" id="aiCamMsg">Preparando la cámara…</p>
+              <p class="ai-cam-msg" id="aiCamMsg" role="status">Preparando la cámara…</p>
               <div class="ai-cam-flash" id="aiFlash"></div>
             </div>
-            <div class="ai-thumbs" id="aiThumbs"></div>
-            <pre class="ai-diag" id="aiDiag" hidden></pre>
-            <div class="ai-cam-actions">
-              <button type="button" class="btn btn-ghost btn-sm" id="aiSkipSides" hidden>Seguir solo con la foto de frente</button>
-              <button type="button" class="btn btn-ghost btn-sm" id="aiRetake" hidden>Repetir fotos</button>
-              <button type="button" class="btn btn-block" id="aiCamDone" hidden>Continuar</button>
-            </div>
+            <p class="ai-note ai-cam-hint">La foto se saca sola cuando tu cara está dentro del óvalo, de frente y con buena luz.</p>
             <p class="form-status" id="aiCamStatus" role="status"></p>
-            <label class="link-btn" for="aiFile">Subir una foto en su lugar</label>
-            <input id="aiFile" type="file" accept="image/*" class="visually-hidden">
+            <div class="ai-cam-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="aiCamRetry" hidden>Reintentar</button>
+            </div>
+            <button type="button" class="link-btn" id="aiCamUpload">Subir una foto en su lugar</button>
+            <button type="button" class="link-btn" id="aiCamSkip">Seguir sin foto</button>
           </div>
 
-          <!-- 3. Cuestionario (4 preguntas; 5 si no hay foto) -->
+          <!-- 2b. Revisión de la foto -->
+          <div data-ai="revision" hidden>
+            <p class="ai-step">Revisá tu foto</p>
+            <div class="ai-review"><img id="aiReviewImg" alt="Tu foto de frente" hidden></div>
+            <ul class="ai-checks" id="aiReviewChecks"></ul>
+            <p class="form-status" id="aiReviewStatus" role="status"></p>
+            <div class="ai-cam-actions">
+              <button type="button" class="btn btn-block" id="aiUse" hidden>Usar esta foto</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="aiRetry">Sacar otra foto</button>
+            </div>
+            <button type="button" class="link-btn" id="aiReviewUpload">Subir una foto en su lugar</button>
+            <button type="button" class="link-btn" id="aiReviewSkip">Seguir sin foto</button>
+            <pre class="ai-diag" id="aiDiag" hidden></pre>
+          </div>
+          <input id="aiFile" type="file" accept="image/*" class="visually-hidden" tabindex="-1" aria-hidden="true">
+
+          <!-- 3. Cuestionario: pantallas cortas, nada marcado de antemano -->
           <div data-ai="quiz" hidden>
             <p class="ai-step" id="aiQStep"></p>
             <div class="ai-progress" aria-hidden="true"><span id="aiQBar"></span></div>
-            <fieldset class="ai-q" id="aiQ"></fieldset>
+            <div id="aiQ"></div>
             <div class="ai-qnav">
               <button type="button" class="btn btn-ghost" id="aiQBack">Atrás</button>
               <button type="button" class="btn" id="aiQNext">Siguiente</button>
@@ -210,7 +233,7 @@
           <!-- 4. Datos de contacto, antes de ver el resultado -->
           <form id="aiLead" data-ai="datos" novalidate hidden>
             <p class="ai-step">Tu resultado está listo</p>
-            <p>Dejanos tus datos para verlo y guardarlo.</p>
+            <p>Dejanos tus datos de contacto para verlo y reservar si querés. Tus respuestas y tu foto no se envían.</p>
             <div class="field-row">
               <div class="field">
                 <label for="a-firstName">Nombre</label>
@@ -248,7 +271,6 @@
 
           <!-- 5. Resultado -->
           <div data-ai="resultado" id="aiResult" hidden tabindex="-1"></div>
-          <p class="fine">No es un diagnóstico. La profesional confirma las necesidades de tu piel en la consulta.</p>
         </div>
       </div>
     </section>
@@ -525,7 +547,7 @@
         <summary>Aviso de privacidad</summary>
         <p>Clínica Centenario usa tu nombre, celular y correo electrónico únicamente para gestionar tu consulta y tu reserva. Si marcás la opción de novedades, también para enviarte información de la clínica; podés darte de baja cuando quieras. No pedimos datos de salud en este formulario.</p>
         <p>Podés solicitar el acceso, la rectificación o la supresión de tus datos, conforme a la Ley N.º 18.331 de Protección de Datos Personales<span id="privacyContact"></span>.</p>
-        <p>Análisis de piel con IA: la foto se reduce y se le quitan los metadatos en tu dispositivo, se envía a un proveedor de inteligencia artificial solo para generar la orientación y la clínica no la guarda. El resultado es orientativo y no es un diagnóstico. Es solo para mayores de 18 años.</p>
+        <p>Evaluación cosmética con IA: la foto se analiza dentro de tu dispositivo y no se envía ni se guarda; para ubicar los puntos del rostro, el navegador descarga un modelo de Google (MediaPipe), sin enviarle la imagen. Las respuestas del cuestionario tampoco se envían. Solo si marcás la casilla para enviar tu resumen a la profesional, guardamos ese texto (sin la foto) junto con tus datos de contacto para preparar tu sesión. No usamos fotos ni respuestas para entrenar sistemas. El resultado es orientativo y no es un diagnóstico. Es solo para mayores de 18 años.</p>
         <p>Si aceptás la medición, usamos cookies de Meta para saber qué anuncios funcionan. No enviamos tu nombre, celular ni correo a esa herramienta.</p>
       </details>
       <p class="copy">© Clínica Centenario · Av. Centenario 3090A, Montevideo</p>
@@ -547,8 +569,9 @@
     </div>
   </div>
 
-  <script src="config.js?v=20261102d"></script>
-  <script src="photos.js?v=20261102d"></script>
+  <script src="config.js?v=20261106a"></script>
+  <script src="photos.js?v=20261106a"></script>
+  <script src="evaluation.js?v=20261106a"></script>
   <script>
     /* Modo demo: solo en localhost, solo con ?demo=1 y solo si no hay API configurada. */
     (function () {
@@ -556,6 +579,6 @@
       window.__ccDemoReady = new Promise(function (ok) { var s = document.createElement('script'); s.src = 'demo-api.js'; s.onload = ok; document.head.appendChild(s); });
     })();
   </script>
-  <script src="app.js?v=20261102d" defer></script>
+  <script src="app.js?v=20261106a" defer></script>
 </body>
 </html>

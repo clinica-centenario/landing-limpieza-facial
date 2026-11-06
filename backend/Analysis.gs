@@ -1,57 +1,66 @@
 /**
- * Orientación de la piel: cuestionario (siempre) + indicadores medidos en la foto (opcional).
+ * Evaluación cosmética: el informe se arma en el teléfono (public/evaluation.js) y acá solo se GUARDA,
+ * cuando la persona marca la casilla para enviar su resumen a la profesional (consentimiento aparte del de contacto).
  *
- * Principios:
- *  - Orientación COSMÉTICA, no diagnóstico. No se nombran enfermedades ni se deriva: lo complejo
- *    queda para evaluar en la consulta. No se recomiendan productos ni técnicas.
- *  - El tipo de piel combina el brillo medido en la foto con las respuestas (Orientation.gs).
- *  - La foto se analiza SOLO en el teléfono (MediaPipe Face Landmarker, Apache-2.0). Acá nunca llega
- *    la imagen: solo las categorías encontradas y los números medidos, que se guardan para calibrar.
- *  - Las respuestas del cuestionario no se guardan: en la planilla queda el resultado con su fundamento.
- *  - Solo mayores de 18. Los datos de contacto (lead) se guardan antes de mostrar el resultado, para vincularlo con la reserva.
+ *  - Nunca llega la foto: si viene una imagen, se rechaza.
+ *  - Se guarda solo texto acotado de categorías conocidas, más números de la foto para calibrar.
+ *  - Nada de esto va a los logs ni a la analítica: el evento registra solo que hubo un envío.
+ *  - Solo mayores de 18, con la solicitud de contacto ya creada (token).
  */
 
-// Lo que el teléfono puede informar de la foto: categorías cerradas.
-var PHOTO_FINDINGS = ['brillo_zona_t', 'brillo_general', 'textura_irregular', 'tono_desparejo', 'enrojecimiento_visible',
-                      'puntos_negros_posibles', 'poros_visibles_posibles', 'granos_posibles', 'milium_posible',
-                      'lunares_visibles', 'manchas_posibles'];
-// Números medidos en el teléfono (se guardan redondeados, para calibrar los umbrales).
-var PHOTO_METRICS = ['fotos', 'brilloZonaT', 'brilloMejillas', 'rojezDif', 'texturaMejillas', 'tonoMejillas', 'puntosNariz', 'porosMejillas',
-                     'granos', 'puntosNegros', 'milium', 'lunares', 'manchas'];
+var REPORT_VERSION_PREFIX = 'v4-';
+var REPORT_CATEGORIES = ['brillo', 'poros', 'textura', 'puntos_oscuros', 'puntos_claros', 'enrojecimiento', 'tono', 'descamacion'];
+var REPORT_STATUS = ['observado', 'no_observado', 'no_evaluable'];
+// Números medidos en el teléfono (se guardan redondeados, para calibrar los umbrales provisorios).
+var PHOTO_METRICS = ['shineT', 'shineC', 'redDiff', 'texture', 'toneCv', 'noseSpots', 'noseBlobs'];
 
-function handleAnalyze_(cfg, body) {
+function handleSaveReport_(cfg, body) {
   if (!checkLeadToken_(body.requestId, body.token)) return fail_('invalid_token');
-  if (body.adult !== true) return fail_('consent_required');
-  if (body.image) return fail_('invalid_request'); // la imagen nunca debe salir del teléfono
-  var answers = cleanAnswers_(body.answers);
-  var photo = cleanPhoto_(body.photo);
-
-  var result = buildOrientation_(answers, photo ? photo.findings : [], photo ? 'analizada' : 'sin_foto', photo ? photo.metrics : null);
-  result.photoMetrics = photo ? photo.metrics : null;
-  logEvent_(cfg, body.requestId, 'analisis_piel', { foto: result.photo, reglas: result.rulesVersion }); // sin respuestas ni resultado
-  try {
-    var contact = readContact_(cfg, String(body.requestId));
-    if (contact) appendAnalysis_(cfg, contact, result);
-  } catch (e) { console.warn('No se pudo guardar el análisis: ' + shortErr_(e)); }
-  delete result.photoMetrics; // los números quedan en la planilla, no hace falta devolverlos
-  result.whatsapp = cfg.WHATSAPP_NUMBER; // para que la persona reciba su resultado por WhatsApp
-  result.ok = true;
-  result.status = 'ok';
-  return result;
+  if (body.adult !== true || body.share !== true) return fail_('consent_required');
+  if (body.image || body.photo) return fail_('invalid_request'); // la imagen nunca debe salir del teléfono
+  var report = cleanReport_(body.report);
+  if (!report) return fail_('invalid_request');
+  var metrics = report.photo === 'analizada' ? cleanMetrics_(body.metrics) : null;
+  var contact = readContact_(cfg, String(body.requestId));
+  if (!contact) return fail_('invalid_token');
+  appendAnalysis_(cfg, contact, report, metrics);
+  logEvent_(cfg, body.requestId, 'resumen_enviado', { foto: report.photo, version: report.version }); // sin contenido
+  return { ok: true, status: 'saved' };
 }
 
-/** Solo categorías conocidas y números acotados; cualquier otra cosa se descarta. */
-function cleanPhoto_(p) {
-  if (!p || typeof p !== 'object') return null;
-  var findings = (Array.isArray(p.findings) ? p.findings : []).filter(function (f, i, a) {
-    return PHOTO_FINDINGS.indexOf(f) >= 0 && a.indexOf(f) === i;
-  });
-  if (findings.indexOf('brillo_general') >= 0) findings = findings.filter(function (f) { return f !== 'brillo_zona_t'; });
-  var metrics = {};
-  var m = (p.metrics && typeof p.metrics === 'object') ? p.metrics : {};
+function shortText_(v, max) { return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max || 300) : ''; }
+function textList_(v, maxItems) { return (Array.isArray(v) ? v : []).map(function (x) { return shortText_(x); }).filter(String).slice(0, maxItems || 12); }
+
+/** Estructura cerrada: lo que no se reconoce se descarta. Devuelve null si falta lo esencial. */
+function cleanReport_(r) {
+  if (!r || typeof r !== 'object') return null;
+  var version = shortText_(r.version, 20);
+  if (version.indexOf(REPORT_VERSION_PREFIX) !== 0) return null;
+  var photo = r.photo === 'analizada' ? 'analizada' : r.photo === 'sin_foto' ? 'sin_foto' : null;
+  if (!photo) return null;
+  var seen = {};
+  var observations = (Array.isArray(r.observations) ? r.observations : []).filter(function (o) {
+    if (!o || REPORT_CATEGORIES.indexOf(o.category) < 0 || REPORT_STATUS.indexOf(o.status) < 0 || seen[o.category]) return false;
+    seen[o.category] = true; return true;
+  }).map(function (o) { return { category: o.category, status: o.status, text: shortText_(o.text) }; });
+  return {
+    version: version, photo: photo,
+    tendency: shortText_(r.tendency, 80) || 'sin orientar',
+    observations: photo === 'analizada' ? observations : [],
+    declared: textList_(r.declared),
+    orientations: textList_(r.orientations, 8),
+    preReview: textList_(r.preReview, 8)
+  };
+}
+
+function cleanMetrics_(m) {
+  if (!m || typeof m !== 'object') return null;
+  var out = {}, any = false;
   PHOTO_METRICS.forEach(function (k) {
-    var v = Number(m[k]);
-    if (isFinite(v) && Math.abs(v) < 1000) metrics[k] = Math.round(v * 1000) / 1000;
+    var v = m[k];
+    if (v === null || v === undefined || v === '') return;
+    v = Number(v);
+    if (isFinite(v) && Math.abs(v) < 1000) { out[k] = Math.round(v * 1000) / 1000; any = true; }
   });
-  return { findings: findings, metrics: metrics };
+  return any ? out : null;
 }

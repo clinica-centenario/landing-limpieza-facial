@@ -201,6 +201,7 @@
         sending = false; setBusy(o.btn, false);
         if (res.ok) {
           session = { requestId: res.requestId, token: res.token, leadEventId: res.leadEventId };
+          if (res.whatsapp) state.whatsapp = res.whatsapp;
           store.set('sessionStorage', 'cc_lead', session);
           // Lead SOLO cuando el servidor confirmó el guardado.
           Track.send('Lead', { eventID: res.leadEventId, dedupeKey: 'Lead:' + res.requestId });
@@ -259,6 +260,7 @@
         state.page = res.page || 0; state.hasMore = !!res.hasMore;
         state.durationMin = res.durationMin || 60;
         state.whatsapp = res.whatsapp || '';
+        if (state.whatsapp) document.dispatchEvent(new Event('cc:whatsapp'));
         renderRecommendations(res.slots || []);
         if (state.slots.length) Track.send('vio_horarios', { dedupeKey: 'vio_horarios:' + session.requestId });
       });
@@ -476,38 +478,36 @@
     }
   })();
 
-  // ── Evaluá tu cara con IA ─────────────────────────────────
-  // Recorrido: introducción → cámara guiada (frente, un costado, el otro) → 4 preguntas → datos → resultado.
-  // Las fotos se analizan SOLO en el teléfono: MediaPipe Face Landmarker (el modelo Apache-2.0 que incluye
-  // UniFace) ubica el rostro y sus zonas, y se miden brillo, textura, tono, rojez relativa y, en prueba,
-  // puntos oscuros en la nariz y poros. Las fotos nunca se envían ni se guardan: al servidor llegan solo
-  // las categorías encontradas y los números medidos (para calibrar).
-  // Analítica: solo hitos del recorrido, nunca respuestas, perfiles ni hallazgos.
-  var QUIZ = [
-    { k: 'sequedad', q: 'Después de lavarte la cara, ¿sentís tirantez o se te descama?', o: [['siempre', 'Sí, casi siempre'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
-    { k: 'reactividad', q: '¿Tu piel arde, pica o se enrojece con algunos productos?', o: [['seguido', 'Sí, seguido'], ['aveces', 'A veces'], ['no', 'No'], ['nose', 'No sé']] },
-    { k: 'mejorar', multi: true, max: 2, q: '¿Qué te gustaría mejorar? Elegí hasta 2.', o: [['puntos_negros', 'Puntos negros'], ['poros', 'Poros'], ['suavidad', 'Suavidad'], ['luminosidad', 'Luminosidad'], ['confort', 'Confort e hidratación'], ['brillo', 'Brillo']] },
-    { k: 'aplica', multi: true, exclusive: ['ninguna'], q: '¿Algo de esto aplica ahora?', o: [['exfoliantes', 'Uso exfoliantes o retinoides (retinol, ácido retinoico)'], ['procedimiento', 'Me hice un procedimiento en el rostro en el último mes'], ['lesiones', 'Tengo irritación fuerte, heridas o una lesión que duele, cambia o sangra'], ['ninguna', 'Ninguna']] }
-  ];
-  var QUIZ_NO_PHOTO = { k: 'brillo', q: 'A media tarde, ¿cómo está tu piel?', o: [['toda', 'Con brillo en toda la cara'], ['zona_t', 'Con brillo solo en frente, nariz y mentón'], ['no', 'Sin brillo notable'], ['nose', 'No sé']] };
-
+  // ── Evaluación cosmética con IA ───────────────────────────
+  // Recorrido: introducción → foto de frente (cámara guiada o archivo) → revisión de la foto → preguntas → datos → informe.
+  // MediaPipe Face Landmarker (red neuronal, Apache-2.0) SOLO ubica el rostro y sus 478 puntos: no reconoce alteraciones
+  // de la piel. Las observaciones son mediciones de imagen hechas en el teléfono (reflejos, contraste local, color relativo
+  // entre zonas) con umbrales provisorios; las reglas y los textos están en evaluation.js.
+  // La foto no se envía ni se guarda. Las respuestas tampoco, salvo que la persona elija enviar el resumen a la
+  // profesional (consentimiento aparte). Analítica: solo hitos del recorrido, nunca respuestas, fotos ni resultados.
+  var EV = window.CCEval;
   // Controles técnicos de la foto. Valores iniciales: calibrarlos con fotos reales de distintos tonos de piel,
   // teléfonos y luces. La exposición se mide por recortes extremos y contraste, no por brillo promedio,
-  // para no penalizar pieles oscuras. Maquillaje, filtros y modo belleza NO se detectan: se pide a la persona.
+  // para no penalizar pieles oscuras. Maquillaje, filtros y modo belleza NO se detectan: se pregunta.
+  // Los controles de zona (tapada, luz de costado) solo vuelven "no evaluable" una categoría: nunca agregan hallazgos.
   var PHOTO_RULES = { minFaceWidth: 0.28, minYawBalance: 0.55, maxRollDeg: 12, minSharpness: 45,
-    maxClipHigh: 0.12, maxClipLow: 0.30, minContrast: 30, maxCheekRatio: 1.7 };
+    maxClipHigh: 0.12, maxClipLow: 0.30, minContrast: 30, maxSideLight: 1.4, occludedFrac: 0.35, occludedDeltaE: 22 };
   // Guía de cámara: posición dentro del óvalo y giro (s = -1..1; 0 = de frente).
-  var CAM_RULES = { frontMaxTurn: 0.18, sideMinTurn: 0.30, sideMaxTurn: 0.80, centerTol: 0.10, minSize: 0.42, sideMinSize: 0.28, maxSize: 0.80, holdFrames: 10 };
-  // Indicadores de piel. Umbrales PROVISORIOS (calibrar con ?diagnostico=1). Mediciones de imagen, no un modelo validado.
-  var SKIN_RULES = { shineT: 0.05, shineGeneralC: 0.04, shineRatio: 2, rednessDiff: 0.035, texture: 7, toneCv: 0.07,
-    noseSpots: 3.5, cheekPores: 7 };
+  var CAM_RULES = { frontMaxTurn: 0.18, centerTol: 0.10, minSize: 0.42, maxSize: 0.80, holdFrames: 10 };
+  var FACE_WIDTH_MM = 135; // ancho medio de pómulo a pómulo en adultos: solo para estimar el detalle (px por mm)
   var DIAG = params.get('diagnostico') === '1';
   var MP_VER = '0.10.14';
   var MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + MP_VER;
   var MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-  // Zonas de la malla facial de MediaPipe usadas para medir.
-  var ZONE_T = [151, 108, 337, 4, 195, 5], CHEEK_R = [50, 117, 205], CHEEK_L = [280, 346, 425];
-  var ZONE_NOSE = [48, 278, 4, 45, 275], ZONE_PORES = [205, 425, 36, 266];
+  // Puntos de la malla de MediaPipe donde se mide (cuadraditos alrededor de cada punto).
+  var ZONE_T = [151, 108, 337, 4, 195, 5], CHEEK_R = [50, 117, 205], CHEEK_L = [280, 346, 425], ZONE_NOSE = [48, 278, 4, 45, 275];
+  // Zonas para mostrar y para controlar si se ven: envolvente convexa de estos puntos (der/izq de la persona).
+  var REGION_IDS = {
+    frente: [67, 109, 10, 338, 297, 299, 337, 151, 108, 69, 104, 333],
+    nariz: [168, 6, 197, 195, 5, 4, 1, 45, 275, 48, 278, 129, 358, 219, 439, 122, 351, 193, 417],
+    mejilla_der: [50, 101, 36, 205, 187, 123, 117, 118, 119, 100, 142, 203, 206, 216, 147],
+    mejilla_izq: [280, 330, 266, 425, 411, 352, 346, 347, 348, 329, 371, 423, 426, 436, 376]
+  };
 
   // Utilidades de imagen: escala de grises, estadísticas, textura y tono (la del tono descuenta
   // la luz que cambia de a poco, para que la sombra natural de la mejilla no cuente como tono desparejo).
@@ -732,28 +732,97 @@
     }
   }
 
-  (function skinOrientation() {
-    if (!CFG.AI_ANALYSIS_ENABLED) return;
+  /** Envolvente convexa (cadena monótona) de puntos [x, y]. */
+  function convexHull(pts) {
+    pts = pts.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    var cross = function (o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+    var lo = [], hi = [];
+    pts.forEach(function (p) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); });
+    pts.slice().reverse().forEach(function (p) { while (hi.length >= 2 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); });
+    return lo.slice(0, -1).concat(hi.slice(0, -1));
+  }
+  /** Polígonos de cada zona en píxeles de la imagen original (sin espejo). */
+  function regionPolygons(W, H, P) {
+    var out = {};
+    Object.keys(REGION_IDS).forEach(function (z) {
+      out[z] = convexHull(REGION_IDS[z].map(function (i) { return [Math.round(P[i].x * W * 10) / 10, Math.round(P[i].y * H * 10) / 10]; }))
+        .map(function (p) { return [Math.max(0, Math.min(W, p[0])), Math.max(0, Math.min(H, p[1]))]; });
+    });
+    return out;
+  }
+  /**
+   * ¿Se ve cada zona? Fracción de píxeles muy distintos del color mediano de la piel (pelo, flequillo, mano,
+   * marco de anteojos, sombra fuerte). Los reflejos no cuentan. Una zona tapada pasa a "no evaluable".
+   */
+  function occlusionOf(canvas, regions) {
+    var W = canvas.width, H = canvas.height, all = [];
+    Object.keys(regions).forEach(function (z) { all = all.concat(regions[z]); });
+    var x0 = Math.min.apply(null, all.map(function (p) { return p[0]; })), x1 = Math.max.apply(null, all.map(function (p) { return p[0]; }));
+    var y0 = Math.min.apply(null, all.map(function (p) { return p[1]; })), y1 = Math.max.apply(null, all.map(function (p) { return p[1]; }));
+    var k = 160 / Math.max(1, x1 - x0), w = 160, h = Math.max(1, Math.round((y1 - y0) * k));
+    var c = document.createElement('canvas'); c.width = w; c.height = h;
+    var ctx = c.getContext('2d'); ctx.drawImage(canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, w, h);
+    var px = ctx.getImageData(0, 0, w, h).data;
+    var masks = {}, lab = new Array(w * h);
+    Object.keys(regions).forEach(function (z) {
+      var m = document.createElement('canvas'); m.width = w; m.height = h;
+      var mc = m.getContext('2d'); mc.beginPath();
+      regions[z].forEach(function (p, i) { var X = (p[0] - x0) * k, Y = (p[1] - y0) * k; if (i) mc.lineTo(X, Y); else mc.moveTo(X, Y); });
+      mc.closePath(); mc.fillStyle = '#fff'; mc.fill();
+      masks[z] = mc.getImageData(0, 0, w, h).data;
+    });
+    var Ls = [], As = [], Bs = [];
+    for (var p = 0, i = 0; p < w * h; p++, i += 4) {
+      var inAny = Object.keys(masks).some(function (z) { return masks[z][i] > 127; });
+      if (!inAny) continue;
+      var v = rgbToLab(px[i], px[i + 1], px[i + 2]); lab[p] = v;
+      if (!(v[0] > 90 && Math.hypot(v[1], v[2]) < 12)) { Ls.push(v[0]); As.push(v[1]); Bs.push(v[2]); }
+    }
+    var med = function (a) { a.sort(function (x, y) { return x - y; }); return a.length ? a[a.length >> 1] : 0; };
+    var ref = [med(Ls), med(As), med(Bs)], out = {}, frac = {};
+    Object.keys(masks).forEach(function (z) {
+      var n = 0, bad = 0, md = masks[z];
+      for (var p2 = 0, j = 0; p2 < w * h; p2++, j += 4) {
+        if (md[j] <= 127 || !lab[p2]) continue;
+        var v2 = lab[p2];
+        if (v2[0] > 90 && Math.hypot(v2[1], v2[2]) < 12) continue; // reflejo
+        n++;
+        if (Math.hypot(v2[0] - ref[0], v2[1] - ref[1], v2[2] - ref[2]) > PHOTO_RULES.occludedDeltaE) bad++;
+      }
+      frac[z] = n ? +(bad / n).toFixed(2) : 1;
+      out[z] = !n || bad / n > PHOTO_RULES.occludedFrac;
+    });
+    return { occluded: out, frac: frac };
+  }
+
+  (function skinEvaluation() {
+    if (!CFG.AI_ANALYSIS_ENABLED || !EV) return;
     $('#analisis').hidden = false; $('#aiHeroLink').hidden = false; $('#aiHeroMicro').hidden = false;
     var card = $('#analisis .ai-tool');
-    var answers = {}, quiz = QUIZ, qi = 0, shots = [], measured = null, busy = false, lms = {}, cam = null;
+    // photo: foto aceptada · pending: foto en revisión. { canvas, P, upload, mirror, url, quality, measures, observations, spots, checks }
+    var answers = {}, screens = [], qi = 0, photo = null, pending = null, report = null, lms = {}, cam = null, camToken = null;
 
     function show(name) {
+      if (name !== 'camara') stopCamera();
       $$('[data-ai]', card).forEach(function (e) { e.hidden = e.getAttribute('data-ai') !== name; });
       if (card.getBoundingClientRect().top < 0) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+    function withTimeout(p, ms, code) { return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error(code)); }, ms); })]); }
     function getLandmarker(mode) {
       if (lms[mode]) return lms[mode];
-      lms[mode] = import(MP_BASE + '/vision_bundle.mjs').then(function (v) {
+      lms[mode] = withTimeout(import(MP_BASE + '/vision_bundle.mjs').then(function (v) {
         return v.FilesetResolver.forVisionTasks(MP_BASE + '/wasm').then(function (fs) {
           return v.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL }, runningMode: mode, numFaces: 2 });
         });
-      });
+      }), 30000, 'model_timeout');
       lms[mode].catch(function () { delete lms[mode]; });
       return lms[mode];
     }
     function diag(d) { var b = $('#aiDiag'); if (!DIAG || !d) { b.hidden = true; return; } b.textContent = JSON.stringify(d, null, 1); b.hidden = false; }
+    function releasePhoto(ph) { if (!ph) return; if (ph.url) URL.revokeObjectURL(ph.url); if (ph.canvas) { ph.canvas.width = 0; ph.canvas.height = 0; } }
+    /** Borra la foto de la memoria de la página (no hay otra copia: nunca se envió ni se guardó). */
+    function discardPhotos() { releasePhoto(photo); releasePhoto(pending); photo = null; pending = null; }
 
     // 1. Introducción
     function needsAdult() {
@@ -762,41 +831,51 @@
     }
     function begin() { Track.send('analisis_inicio', { dedupeKey: 'analisis_inicio:' + PAGE_LOADED_AT }); }
     $('#aiStart').addEventListener('click', function () { if (needsAdult()) return; begin(); startCamera(); });
-    $('#aiUploadStart').addEventListener('click', function () { if (needsAdult()) return; begin(); show('camara'); $('#aiFile').click(); });
-    $('#aiNoPhoto').addEventListener('click', function () { if (needsAdult()) return; begin(); shots = []; measured = null; startQuiz(); });
+    $('#aiUploadStart').addEventListener('click', function () { if (needsAdult()) return; begin(); $('#aiFile').click(); });
+    $('#aiNoPhoto').addEventListener('click', function () { if (needsAdult()) return; begin(); withoutPhoto(); });
+    function withoutPhoto() { discardPhotos(); startQuiz(); }
 
-    // 2. Cámara guiada
-    var STEPS = [{ key: 'frente', label: 'De frente' }, { key: 'lado1', label: 'Un costado' }, { key: 'lado2', label: 'El otro costado' }];
+    // 2. Cámara guiada: una foto de frente, con captura automática cuando la cara está bien ubicada
     function setMsg(t, ready) { $('#aiCamMsg').textContent = t; $('#aiCam').classList.toggle('is-ready', !!ready); }
     function startCamera() {
-      show('camara'); resetShots(); setMsg('Preparando la cámara…');
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return cameraFail('Este navegador no permite usar la cámara.');
-      var video = $('#aiVideo');
-      Promise.all([
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false }),
-        getLandmarker('VIDEO')
-      ]).then(function (r) {
-        cam = { stream: r[0], lm: r[1], step: 0, hold: 0, firstSign: 0, last: 0, frame: 0, light: null, started: Date.now() };
-        video.srcObject = r[0];
-        return video.play().then(function () { loop(); });
-      }).catch(function (e) {
-        cameraFail(e && e.name === 'NotAllowedError' ? 'No diste permiso para usar la cámara.' : 'No pudimos abrir la cámara.');
+      show('camara'); stopCamera(); setMsg('Preparando la cámara…'); status($('#aiCamStatus'), ''); $('#aiCamRetry').hidden = true;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return cameraFail('Este navegador no permite usar la cámara.', false);
+      var token = camToken = {};
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1920 } }, audio: false }).then(function (stream) {
+        if (camToken !== token) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        cam = { stream: stream, hold: 0, last: 0, frame: 0, light: null, startedAt: Date.now() };
+        var video = $('#aiVideo'); video.srcObject = stream; video.play().catch(function () {});
+        setMsg('Cargando el análisis de la foto…');
+        return getLandmarker('VIDEO').then(function (lm) { if (cam && camToken === token) { cam.lm = lm; cam.startedAt = Date.now(); loop(); } },
+          function () { if (camToken === token) modelFail(); });
+      }, function (e) {
+        if (camToken !== token) return;
+        var n = e && e.name;
+        cameraFail(n === 'NotAllowedError' || n === 'SecurityError' ? 'No diste permiso para usar la cámara. Podés habilitarlo en la configuración del navegador y reintentar.'
+          : n === 'NotFoundError' || n === 'OverconstrainedError' ? 'No encontramos una cámara en este dispositivo.'
+          : n === 'NotReadableError' ? 'La cámara está en uso por otra aplicación. Cerrala y reintentá.' : 'No pudimos abrir la cámara.', n !== 'NotFoundError');
       });
     }
-    function cameraFail(msg) {
-      stopCamera(); setMsg(msg);
-      status($('#aiCamStatus'), msg + ' Podés subir una foto o hacerlo sin fotos.', 'error');
+    function cameraFail(msg, canRetry) {
+      stopCamera(); setMsg('Cámara no disponible');
+      status($('#aiCamStatus'), msg + ' También podés subir una foto o seguir sin foto.', 'error');
+      $('#aiCamRetry').hidden = !canRetry;
+    }
+    function modelFail() {
+      stopCamera(); setMsg('No se pudo cargar el análisis');
+      status($('#aiCamStatus'), 'No pudimos cargar el análisis de la foto (puede ser la conexión o el navegador). Reintentá o seguí sin foto: el resultado saldrá de tus respuestas.', 'error');
+      $('#aiCamRetry').hidden = false;
     }
     function stopCamera() {
+      camToken = null;
       if (cam && cam.stream) cam.stream.getTracks().forEach(function (t) { t.stop(); });
       if (cam) cam.stopped = true;
       cam = null;
+      var v = $('#aiVideo'); if (v) v.srcObject = null;
     }
-    function resetShots() {
-      shots = []; measured = null; $('#aiThumbs').innerHTML = ''; diag(null);
-      $('#aiCamDone').hidden = true; $('#aiRetake').hidden = true; $('#aiSkipSides').hidden = true; status($('#aiCamStatus'), '');
-      $('#aiCamStep').textContent = 'Foto 1 de 3 · De frente';
-    }
+    $('#aiCamRetry').addEventListener('click', startCamera);
+    $('#aiCamSkip').addEventListener('click', withoutPhoto);
+    $('#aiCamUpload').addEventListener('click', function () { $('#aiFile').click(); });
     /** Posición del rostro en el recuadro visible (el video se muestra recortado y en espejo). */
     function faceBox(P, video) {
       var vw = video.videoWidth, vh = video.videoHeight, box = $('#aiCam').getBoundingClientRect();
@@ -805,7 +884,7 @@
       var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs), minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
       return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX };
     }
-    /** Giro: -1..1 (0 = de frente). El signo distingue un costado del otro. */
+    /** Giro: -1..1 (0 = de frente). */
     function turnOf(P) { var dl = Math.abs(P[1].x - P[234].x), dr = Math.abs(P[454].x - P[1].x); return (dl - dr) / Math.max(1e-6, dl + dr); }
     function rollOf(P, W, H) { return Math.abs(Math.atan2((P[263].y - P[33].y) * H, (P[263].x - P[33].x) * W) * 180 / Math.PI); }
     function loop() {
@@ -813,36 +892,34 @@
       var video = $('#aiVideo'), now = performance.now();
       if (now - cam.last < 66 || video.readyState < 2) { requestAnimationFrame(loop); return; } // ~15 cuadros por segundo
       cam.last = now; cam.frame++;
-      var res = cam.lm.detectForVideo(video, now), faces = res && res.faceLandmarks || [];
+      var faces;
+      try { var res = cam.lm.detectForVideo(video, now); faces = res && res.faceLandmarks || []; }
+      catch (e) { return modelFail(); }
       guide(faces, video);
-      requestAnimationFrame(loop);
+      if (cam && !cam.hinted && Date.now() - cam.startedAt > 25000) {
+        cam.hinted = true;
+        status($('#aiCamStatus'), '¿Cuesta? Probá mirando hacia una ventana, con el celular a la altura de los ojos. También podés subir una foto.');
+      }
+      if (cam) requestAnimationFrame(loop);
     }
     function guide(faces, video) {
-      var st = STEPS[cam.step], R = CAM_RULES;
-      if (cam.step > 0 && Date.now() - cam.stepAt > 12000) $('#aiSkipSides').hidden = false;
+      var R = CAM_RULES;
       if (!faces.length) { cam.hold = 0; return setMsg('Centrá tu cara en el óvalo'); }
       if (faces.length > 1) { cam.hold = 0; return setMsg('Tiene que aparecer solo tu cara'); }
       var P = faces[0], b = faceBox(P, video), s = turnOf(P), roll = rollOf(P, video.videoWidth, video.videoHeight);
       if (cam.frame % 6 === 0) cam.light = lightOf(video, P);
       var msg = '';
-      if (b.w < (cam.step ? R.sideMinSize : R.minSize)) msg = 'Acercate un poco'; // de costado la cara se ve más angosta
+      if (b.w < R.minSize) msg = 'Acercate un poco';
       else if (b.w > R.maxSize) msg = 'Alejate un poco';
-      else if (Math.abs(b.cx - 0.5) > (cam.step ? R.centerTol * 1.6 : R.centerTol) || Math.abs(b.cy - 0.45) > R.centerTol * 1.4) msg = 'Centrá tu cara en el óvalo';
+      else if (Math.abs(b.cx - 0.5) > R.centerTol || Math.abs(b.cy - 0.45) > R.centerTol * 1.4) msg = 'Centrá tu cara en el óvalo';
       else if (cam.light === 'oscuro') msg = 'Buscá más luz, de frente';
       else if (cam.light === 'quemado') msg = 'Hay demasiada luz: buscá una más suave';
-      else if (cam.step === 0) {
-        if (Math.abs(s) > R.frontMaxTurn) msg = 'Mirá de frente a la cámara';
-        else if (roll > PHOTO_RULES.maxRollDeg) msg = 'Enderezá la cabeza';
-      } else {
-        var wrongSide = cam.step === 2 && Math.sign(s) === cam.firstSign && Math.abs(s) > 0.15;
-        if (wrongSide) msg = 'Ahora girá hacia el otro costado';
-        else if (Math.abs(s) < R.sideMinTurn) msg = cam.step === 1 ? 'Girá la cabeza despacio hacia un costado' : 'Girá despacio hacia el otro costado';
-        else if (Math.abs(s) > R.sideMaxTurn) msg = 'Girá un poco menos';
-      }
+      else if (Math.abs(s) > R.frontMaxTurn) msg = 'Mirá de frente a la cámara';
+      else if (roll > PHOTO_RULES.maxRollDeg) msg = 'Enderezá la cabeza';
       if (msg) { cam.hold = 0; return setMsg(msg); }
       cam.hold++;
-      setMsg('¡Quedate quieta! Sacando foto…', true);
-      if (cam.hold >= R.holdFrames) capture(P, s);
+      setMsg('Quedate quieta un momento…', true);
+      if (cam.hold >= R.holdFrames) capture(P);
     }
     function lightOf(video, P) {
       var c = document.createElement('canvas'), W = video.videoWidth, H = video.videoHeight;
@@ -854,71 +931,39 @@
       var q = imageStats({ g: g, w: 48, h: 48 });
       return q.clipHigh > PHOTO_RULES.maxClipHigh ? 'quemado' : (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) ? 'oscuro' : 'ok';
     }
-    function capture(P, s) {
+    function capture(P) {
       var video = $('#aiVideo'), c = document.createElement('canvas');
       c.width = video.videoWidth; c.height = video.videoHeight;
       c.getContext('2d').drawImage(video, 0, 0); // sin espejo: la imagen real
-      var checks = {}, list = evaluatePhoto(c, [P], checks);
-      if (cam.step > 0) list = list.filter(function (x) { return !/girada/.test(x[1]); }); // en los costados el giro es lo pedido
-      var bad = list.filter(function (x) { return x[0] === 'bad'; })[0];
-      if (bad) { cam.hold = 0; setMsg(bad[1]); return; }
+      var checks = {}, bad = evaluatePhoto(c, [P], checks).filter(function (x) { return x[0] === 'bad'; })[0];
+      if (bad) { cam.hold = 0; setMsg(bad[1]); c.width = 0; return; }
       var fl = $('#aiFlash'); fl.classList.add('is-on'); setTimeout(function () { fl.classList.remove('is-on'); }, 60);
-      if (cam.step === 1) cam.firstSign = Math.sign(s);
-      shots.push({ view: STEPS[cam.step].key, canvas: c, P: P, turn: s, checks: checks });
-      addThumb(c, STEPS[cam.step].label);
-      cam.step++; cam.hold = 0; cam.stepAt = Date.now();
-      if (cam.step === 1) $('#aiSkipSides').hidden = true;
-      if (cam.step >= STEPS.length) return finishShots();
-      $('#aiCamStep').textContent = 'Foto ' + (cam.step + 1) + ' de 3 · ' + STEPS[cam.step].label;
-    }
-    function addThumb(c, label) {
-      var f = el('figure'), img = el('img');
-      var t = document.createElement('canvas'), k = 160 / c.width; t.width = 160; t.height = Math.round(c.height * k);
-      var x = t.getContext('2d'); x.translate(t.width, 0); x.scale(-1, 1); x.drawImage(c, 0, 0, t.width, t.height); // miniatura en espejo, como la ve la persona
-      img.src = t.toDataURL('image/jpeg', 0.7); img.alt = 'Foto: ' + label;
-      f.appendChild(img); f.appendChild(document.createTextNode(label)); $('#aiThumbs').appendChild(f);
-    }
-    function finishShots() {
       stopCamera();
-      measured = measureSkin(shots);
-      setMsg(shots.length > 1 ? '¡Listo! Tenemos tus fotos.' : '¡Listo! Tenemos tu foto.', true);
-      diag({ controles: shots.map(function (x) { return x.checks; }), indicadores: measured.metrics, hallazgos: measured.findings, detalle: measured.debug });
-      $('#aiCamDone').hidden = false; $('#aiRetake').hidden = false; $('#aiSkipSides').hidden = true;
-      Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
+      prepare(c, P, { upload: false, mirror: true, checks: checks });
     }
-    $('#aiSkipSides').addEventListener('click', function () { if (shots.length) finishShots(); });
-    $('#aiRetake').addEventListener('click', startCamera);
-    $('#aiCamDone').addEventListener('click', function () { startQuiz(); });
 
     // Alternativa: subir una foto de frente
     $('#aiFile').addEventListener('change', function () { loadFile(this.files && this.files[0]); this.value = ''; });
     function loadFile(f) {
-      stopCamera(); resetShots();
       if (!f) return;
-      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) { status($('#aiCamStatus'), 'Elegí una foto (JPG o PNG).', 'error'); return; }
+      stopCamera(); show('revision'); reviewLoading('Revisando la foto…');
+      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)) return reviewRejected(null, ['Elegí una foto (JPG o PNG).']);
       var url = URL.createObjectURL(f), img = new Image();
       img.onload = function () {
-        var max = 1280, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        var max = 1600, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
         var c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // respeta la orientación EXIF y no copia metadatos
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); // el navegador aplica la orientación EXIF; no se copian metadatos
         URL.revokeObjectURL(url);
-        if (Math.min(img.naturalWidth, img.naturalHeight) < 480) return photoRejected('La foto tiene poca resolución. Probá con la cámara del teléfono.');
-        setMsg('Revisando la foto…');
+        if (Math.min(img.naturalWidth, img.naturalHeight) < 480) return reviewRejected(c, ['La foto tiene poca resolución. Probá con la cámara del teléfono.']);
         getLandmarker('IMAGE').then(function (lm) {
-          var faces = (lm.detect(c) || {}).faceLandmarks || [], checks = {}, list = evaluatePhoto(c, faces, checks);
-          var bad = list.filter(function (x) { return x[0] === 'bad'; }).map(function (x) { return x[1]; });
-          if (bad.length) return photoRejected(bad.join(' '), checks);
-          shots = [{ view: 'frente', canvas: c, P: faces[0], turn: 0, checks: checks }];
-          addThumb(c, 'De frente'); finishShots();
-        }).catch(function () { photoRejected('No pudimos revisar la foto en este dispositivo. Podés hacerlo sin fotos.'); });
+          var faces = (lm.detect(c) || {}).faceLandmarks || [], checks = {};
+          var bad = evaluatePhoto(c, faces, checks).filter(function (x) { return x[0] === 'bad'; }).map(function (x) { return x[1]; });
+          if (bad.length) { diag({ controles: checks }); return reviewRejected(c, bad); }
+          prepare(c, faces[0], { upload: true, mirror: false, checks: checks });
+        }).catch(function () { reviewRejected(c, ['No pudimos cargar el análisis de la foto en este dispositivo (puede ser la conexión). Reintentá o seguí sin foto.']); });
       };
-      img.onerror = function () { URL.revokeObjectURL(url); status($('#aiCamStatus'), 'No pudimos leer esa foto. Probá con una en JPG o PNG.', 'error'); };
+      img.onerror = function () { URL.revokeObjectURL(url); reviewRejected(null, ['No pudimos leer esa foto. Probá con una en JPG o PNG.']); };
       img.src = url;
-    }
-    function photoRejected(msg, checks) {
-      setMsg('Esta foto no sirve'); diag(checks ? { controles: checks } : null);
-      status($('#aiCamStatus'), msg + ' Sacá otra o hacelo sin fotos.', 'error');
-      Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
     }
 
     function evaluatePhoto(canvas, faces, m) {
@@ -937,25 +982,106 @@
       var bx = Math.max(0, minX * W), by = Math.max(0, minY * H), bw = Math.min(W, maxX * W) - bx, bh = Math.min(H, maxY * H) - by;
       var q = imageStats(grayCrop(canvas, bx, by, bw, bh, 256));
       m.nitidez = Math.round(q.sharpness); m.quemado = +q.clipHigh.toFixed(3); m.oscuro = +q.clipLow.toFixed(3); m.contraste = q.contrast;
-      if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto salió movida. Quedate quieta un segundo.']);
-      if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos en la cara. Buscá una luz más suave.']);
-      else if (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) out.push(['bad', 'La foto está muy oscura. Buscá más luz, de frente.']);
+      // Primero la luz: con poca luz o zonas quemadas la nitidez medida baja y "movida" sería un motivo equivocado.
+      if (q.clipHigh > PHOTO_RULES.maxClipHigh) out.push(['bad', 'Hay demasiada luz o reflejos fuertes en la cara. Buscá una luz más suave, sin sol directo.']);
+      else if (q.clipLow > PHOTO_RULES.maxClipLow || q.contrast < PHOTO_RULES.minContrast) out.push(['bad', 'La foto está muy oscura. Buscá más luz, de frente (por ejemplo, mirando a una ventana).']);
+      else if (q.sharpness < PHOTO_RULES.minSharpness) out.push(['bad', 'La foto salió movida o desenfocada. Apoyá los codos y quedate quieta un segundo.']);
       var sz = (maxX - minX) * W * 0.12;
       var mL = meanLum(canvas, P[50].x * W - sz / 2, P[50].y * H - sz / 2, sz), mR = meanLum(canvas, P[280].x * W - sz / 2, P[280].y * H - sz / 2, sz);
       m.luzLados = +(Math.max(mL, mR) / Math.max(1, Math.min(mL, mR))).toFixed(2);
       return out;
     }
 
+    /** Analiza la foto de frente: zonas, si se ven, detalle disponible y mediciones. */
+    function analyzeFront(canvas, P, checks) {
+      var W = canvas.width, H = canvas.height;
+      var regions = regionPolygons(W, H, P);
+      var occ = occlusionOf(canvas, regions);
+      var pxPerMm = Math.hypot((P[454].x - P[234].x) * W, (P[454].y - P[234].y) * H) / FACE_WIDTH_MM;
+      var quality = { pxPerMm: +pxPerMm.toFixed(2), sideLight: checks.luzLados > PHOTO_RULES.maxSideLight, occluded: occ.occluded };
+      var measures = measureSkin(canvas, P, occ.occluded);
+      var observations = EV.observePhoto(measures, quality, regions);
+      return { regions: regions, quality: quality, occlusionFrac: occ.frac, measures: measures, observations: observations, spots: measures.spots };
+    }
+    function prepare(canvas, P, o) {
+      var a;
+      try { a = analyzeFront(canvas, P, o.checks); }
+      catch (e) { return reviewRejected(canvas, ['No pudimos analizar esta foto. Probá con otra o seguí sin foto.'], true); }
+      releasePhoto(pending);
+      pending = { canvas: canvas, P: P, upload: o.upload, mirror: o.mirror, checks: o.checks, quality: a.quality, measures: a.measures,
+        observations: a.observations, spots: a.spots, regions: a.regions, url: null };
+      canvas.toBlob(function (b) {
+        if (!pending || pending.canvas !== canvas) return;
+        pending.url = b ? URL.createObjectURL(b) : canvas.toDataURL('image/jpeg', 0.92);
+        renderReview(pending);
+      }, 'image/jpeg', 0.92);
+      diag({ controles: o.checks, calidad: a.quality, zonasTapadas: a.occlusionFrac, mediciones: a.measures.raw,
+        observaciones: a.observations.map(function (x) { return x.category + ': ' + x.status + (x.reason ? ' (' + x.reason + ')' : ''); }),
+        puntualesSoloDiagnostico: a.spots.counts });
+    }
+
+    // Revisión de la foto antes de usarla
+    function reviewLoading(msg) {
+      $('#aiReviewImg').hidden = true; $('#aiReviewChecks').innerHTML = ''; $('#aiUse').hidden = true;
+      status($('#aiReviewStatus'), msg);
+    }
+    function showReviewImage(src, mirror) {
+      var img = $('#aiReviewImg'); img.src = src; img.hidden = false; img.classList.toggle('is-mirror', !!mirror);
+    }
+    function checkItem(kind, text) { var li = el('li', 'is-' + kind, text); return li; }
+    function renderReview(ph) {
+      show('revision');
+      showReviewImage(ph.url, ph.mirror);
+      var ul = $('#aiReviewChecks'); ul.innerHTML = '';
+      ul.appendChild(checkItem('ok', 'Se ve un solo rostro, de frente y completo.'));
+      ul.appendChild(checkItem('ok', 'Nitidez y luz suficientes.'));
+      var q = ph.quality, occ = q.occluded || {}, warns = [];
+      if (occ.frente) warns.push('La frente se ve tapada o con sombra (pelo, flequillo o gorro). Esa zona no se va a evaluar.');
+      if (occ.nariz) warns.push('La nariz se ve tapada o con sombra. Esa zona no se va a evaluar.');
+      if (occ.mejilla_der && occ.mejilla_izq) warns.push('Las mejillas se ven tapadas o con sombra. No se van a evaluar.');
+      else if (occ.mejilla_der || occ.mejilla_izq) warns.push('Una mejilla se ve tapada o con sombra (pelo, mano o luz de costado). Se evalúa solo la otra.');
+      if (q.sideLight) warns.push('La luz llega más de un lado de la cara. Brillo, rojez y tono no se van a evaluar: probá de frente a una ventana.');
+      if (!(q.pxPerMm >= EV.NEEDS.puntos_oscuros.pxPerMm)) warns.push('La foto tiene poco detalle de cerca: algunas observaciones no se van a evaluar. Acercá un poco la cámara si querés incluirlas.');
+      warns.forEach(function (w) { ul.appendChild(checkItem('warn', w)); });
+      $('#aiUse').hidden = false;
+      $('#aiRetry').textContent = ph.upload ? 'Elegir otra foto' : 'Sacar otra foto';
+      status($('#aiReviewStatus'), warns.length ? 'Podés usarla igual o repetirla para evaluar más zonas.' : 'Si se ve bien, usala. Si no, repetila.');
+      Track.send('analisis_foto_lista', { dedupeKey: 'analisis_foto_lista:' + PAGE_LOADED_AT });
+    }
+    function reviewRejected(canvas, msgs, analysisError) {
+      show('revision');
+      var ul = $('#aiReviewChecks'); ul.innerHTML = '';
+      msgs.forEach(function (m) { ul.appendChild(checkItem('bad', m)); });
+      $('#aiUse').hidden = true;
+      if (canvas && canvas.width) showReviewImage(canvas.toDataURL('image/jpeg', 0.85), false); else $('#aiReviewImg').hidden = true;
+      if (canvas) { canvas.width = 0; canvas.height = 0; } // no se conserva
+      $('#aiRetry').textContent = 'Probar de nuevo';
+      status($('#aiReviewStatus'), analysisError ? 'Podés reintentar con otra foto o seguir solo con las preguntas.' : 'Esta foto no sirve para evaluar la piel. Sacá otra o seguí sin foto.', 'error');
+      Track.send('analisis_foto_rechazada', { dedupeKey: 'analisis_foto_rechazada:' + Date.now() });
+    }
+    $('#aiUse').addEventListener('click', function () {
+      if (!pending) return;
+      releasePhoto(photo); photo = pending; pending = null;
+      Track.send('analisis_foto_aceptada', { dedupeKey: 'analisis_foto_aceptada:' + PAGE_LOADED_AT });
+      startQuiz();
+    });
+    $('#aiRetry').addEventListener('click', function () {
+      var wasUpload = pending ? pending.upload : $('#aiRetry').textContent === 'Elegir otra foto';
+      releasePhoto(pending); pending = null; $('#aiReviewImg').removeAttribute('src');
+      if (wasUpload) $('#aiFile').click(); else startCamera();
+    });
+    $('#aiReviewUpload').addEventListener('click', function () { $('#aiFile').click(); });
+    $('#aiReviewSkip').addEventListener('click', withoutPhoto);
+
     /**
-     * Indicadores por zona con los puntos faciales: zona T contra mejillas (de frente) y la mejilla que se ve
-     * mejor en cada costado. Comparar zonas del mismo rostro reduce el efecto del tono de piel y de la luz
-     * general, pero no lo elimina: por eso los umbrales se calibran con fotos reales.
+     * Mediciones por zona con los puntos faciales. Comparar zonas del mismo rostro reduce el efecto del tono de piel
+     * y de la luz general, pero no lo elimina. Umbrales en evaluation.js (provisorios).
      */
     function zoneStats(canvas, P, ids) {
       var W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d');
       var xs = P.map(function (p) { return p.x; });
       var size = Math.max(8, Math.round((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * W * 0.08));
-      var spec = 0, red = 0, n = 0, nRed = 0, tex = 0, cv = 0, spots = 0, pores = 0;
+      var spec = 0, red = 0, n = 0, nRed = 0, tex = 0, cv = 0, spots = 0;
       ids.forEach(function (i) {
         var x = Math.max(0, Math.round(P[i].x * W - size / 2)), y = Math.max(0, Math.round(P[i].y * H - size / 2));
         var d = ctx.getImageData(x, y, size, size).data;
@@ -966,12 +1092,11 @@
           if (lum >= 230 && sat < 0.25) { spec++; continue; } // reflejo especular (brillo): no cuenta para el color
           red += (r - g) / (r + g + b + 1); nRed++;
         }
-        var fine = grayCrop(canvas, x, y, size, size, 48);
         tex += lapEnergy(grayCrop(canvas, x, y, size, size, 32)); cv += detrendedCv(grayCrop(canvas, x, y, size, size, 8));
-        spots += darkSpots(fine, 0.80, 12, 10); pores += darkSpots(fine, 0.90, 6, 4);
+        spots += darkSpots(grayCrop(canvas, x, y, size, size, 48), 0.80, 12, 10);
       });
       var m = ids.length;
-      return { spec: spec / n, red: nRed ? red / nRed : 0, tex: tex / m, cv: cv / m, spots: spots / m, pores: pores / m };
+      return { spec: spec / n, red: nRed ? red / nRed : 0, tex: tex / m, cv: cv / m, spots: spots / m };
     }
     /** Puntos más oscuros que su entorno (fondo = desenfoque local), chicos y aislados. Densidad por 1000 px. */
     function darkSpots(im, ratio, minDiff, maxArea) {
@@ -984,223 +1109,320 @@
         bg[y * w + x] = s / c;
         var v = g[y * w + x]; mask[y * w + x] = (v < bg[y * w + x] * ratio && bg[y * w + x] - v > minDiff) ? 1 : 0;
       }
-      var seen = new Uint8Array(g.length), count = 0;
-      for (var p = 0; p < g.length; p++) {
-        if (!mask[p] || seen[p]) continue;
-        var stack = [p], area = 0; seen[p] = 1;
-        while (stack.length) {
-          var q = stack.pop(); area++;
-          var qx = q % w, qy = (q / w) | 0;
-          [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (dd) {
-            var nx = qx + dd[0], ny = qy + dd[1], np = ny * w + nx;
-            if (nx >= 0 && ny >= 0 && nx < w && ny < h && mask[np] && !seen[np]) { seen[np] = 1; stack.push(np); }
-          });
-        }
-        if (area <= maxArea) count++;
-      }
+      var count = 0;
+      components(mask, w, h, function (cmp) { if (cmp.area <= maxArea) count++; });
       return count / g.length * 1000;
     }
-    function measureSkin(list) {
-      var front = list[0], R = SKIN_RULES, f = [];
-      var T = zoneStats(front.canvas, front.P, ZONE_T);
-      var C = zoneStats(front.canvas, front.P, CHEEK_R.concat(CHEEK_L));
-      var N = zoneStats(front.canvas, front.P, ZONE_NOSE), PO = zoneStats(front.canvas, front.P, ZONE_PORES);
-      // En los costados se mide la mejilla que queda hacia la cámara (la más ancha entre nariz y borde).
-      var tex = [C.tex], cv = [C.cv], pores = [PO.pores];
-      list.slice(1).forEach(function (s) {
-        var dl = Math.abs(s.P[1].x - s.P[234].x), dr = Math.abs(s.P[454].x - s.P[1].x);
-        var side = zoneStats(s.canvas, s.P, dl > dr ? CHEEK_R : CHEEK_L);
-        tex.push(side.tex); cv.push(side.cv); pores.push(side.pores);
-      });
-      var avg = function (a) { return a.reduce(function (x, y) { return x + y; }, 0) / a.length; };
-      var texA = avg(tex), cvA = avg(cv), poA = avg(pores);
-      var det = detectSpots(front.canvas, front.P), n = det.counts;
-      var metrics = { fotos: list.length, brilloZonaT: +T.spec.toFixed(3), brilloMejillas: +C.spec.toFixed(3), rojezDif: +(C.red - T.red).toFixed(3),
-        texturaMejillas: +texA.toFixed(2), tonoMejillas: +cvA.toFixed(3), puntosNariz: +N.spots.toFixed(2), porosMejillas: +poA.toFixed(2),
-        granos: n.grano, puntosNegros: n.punto_negro, milium: n.milium, lunares: n.lunar, manchas: n.mancha };
-      if (T.spec >= R.shineT && C.spec >= R.shineGeneralC) f.push('brillo_general');
-      else if (T.spec >= R.shineT && T.spec >= R.shineRatio * C.spec + 0.01) f.push('brillo_zona_t');
-      if (texA >= R.texture) f.push('textura_irregular');
-      if (cvA >= R.toneCv) f.push('tono_desparejo');
-      if (C.red - T.red >= R.rednessDiff) f.push('enrojecimiento_visible');
-      if (N.spots >= R.noseSpots || n.punto_negro >= SPOT_RULES.blackhead.minCount) f.push('puntos_negros_posibles');
-      if (poA >= R.cheekPores) f.push('poros_visibles_posibles');
-      if (n.grano) f.push('granos_posibles');
-      if (n.milium) f.push('milium_posible');
-      if (n.lunar) f.push('lunares_visibles');
-      if (n.mancha) f.push('manchas_posibles');
-      return { findings: f, metrics: metrics, spots: det.spots, debug: det.debug };
+    function measureSkin(canvas, P, occ) {
+      var T = zoneStats(canvas, P, ZONE_T), N = zoneStats(canvas, P, ZONE_NOSE);
+      var cheeks = [];
+      if (!occ.mejilla_der) cheeks.push(zoneStats(canvas, P, CHEEK_R));
+      if (!occ.mejilla_izq) cheeks.push(zoneStats(canvas, P, CHEEK_L));
+      var avg = function (k) { return cheeks.length ? cheeks.reduce(function (s, c) { return s + c[k]; }, 0) / cheeks.length : NaN; };
+      var det = detectSpots(canvas, P); // localización puntual: SOLO diagnóstico (no validada para mostrar)
+      var m = { shineT: T.spec, shineC: avg('spec'), redDiff: avg('red') - T.red, texture: avg('tex'), toneCv: avg('cv'), noseSpots: N.spots, noseBlobs: det.counts.punto_negro };
+      var raw = {};
+      Object.keys(m).forEach(function (k) { raw[k] = isFinite(m[k]) ? +m[k].toFixed(3) : null; });
+      m.raw = raw; m.spots = det;
+      return m;
     }
 
-    // 3. Cuestionario (4 preguntas; si no hubo foto, se suma la del brillo)
-    function startQuiz() { quiz = measured ? QUIZ : [QUIZ_NO_PHOTO].concat(QUIZ); qi = 0; show('quiz'); renderQuestion(); }
-    function optionList(name, opts, multi, current) {
-      var wrap = el('div');
-      opts.forEach(function (o) {
-        var lab = el('label', 'ai-opt'), inp = document.createElement('input');
-        inp.type = multi ? 'checkbox' : 'radio'; inp.name = name; inp.value = o[0];
-        inp.checked = multi ? (current || []).indexOf(o[0]) >= 0 : current === o[0];
-        lab.appendChild(inp); lab.appendChild(document.createTextNode(o[1])); wrap.appendChild(lab);
-      });
-      return wrap;
-    }
-    function renderQuestion() {
-      var q = quiz[qi], box = $('#aiQ');
-      $('#aiQStep').textContent = 'Pregunta ' + (qi + 1) + ' de ' + quiz.length;
-      $('#aiQBar').style.width = Math.round(qi / quiz.length * 100) + '%';
+    // 3. Cuestionario: pantallas cortas, nada marcado de antemano; "No sé" es una respuesta válida
+    function startQuiz() { screens = EV.quizFor({ photo: !!photo, upload: !!(photo && photo.upload) }); qi = 0; show('quiz'); renderScreen(); }
+    function renderScreen() {
+      var sc = screens[qi], box = $('#aiQ');
+      $('#aiQStep').textContent = 'Paso ' + (qi + 1) + ' de ' + screens.length + ' · ' + sc.title;
+      $('#aiQBar').style.width = Math.round(qi / screens.length * 100) + '%';
       box.innerHTML = ''; status($('#aiQStatus'), '');
-      box.appendChild(el('legend', null, q.q));
-      box.appendChild(optionList('q_' + q.k, q.o, q.multi, answers[q.k]));
+      if (sc.intro) box.appendChild(el('p', 'ai-q-intro', sc.intro));
+      var vis = EV.visibleItems(sc, answers);
+      sc.items.forEach(function (it) { if (vis.indexOf(it) < 0) delete answers[it.k]; }); // lo que deja de aplicar no se conserva
+      vis.forEach(function (it) {
+        var fs = el('fieldset', 'ai-q' + (it.o.length === 2 ? ' is-inline' : '')); fs.setAttribute('data-k', it.k);
+        fs.appendChild(el('legend', null, it.q));
+        var cur = answers[it.k];
+        it.o.forEach(function (o) {
+          var lab = el('label', 'ai-opt'), inp = document.createElement('input');
+          inp.type = it.multi ? 'checkbox' : 'radio'; inp.name = 'q_' + it.k; inp.value = o[0];
+          inp.checked = it.multi ? (cur || []).indexOf(o[0]) >= 0 : cur === o[0];
+          lab.appendChild(inp); lab.appendChild(document.createTextNode(o[1])); fs.appendChild(lab);
+        });
+        box.appendChild(fs);
+      });
       box.onchange = function (e) {
-        var t = e.target;
-        if (q.multi) {
-          var all = $$('input[name="q_' + q.k + '"]', box), excl = q.exclusive || [];
+        var t = e.target, fs = t.closest('fieldset'), k = fs && fs.getAttribute('data-k'), it = sc.items.filter(function (x) { return x.k === k; })[0];
+        if (!it) return;
+        if (it.multi) {
+          var all = $$('input', fs), excl = it.exclusive || [];
           all.forEach(function (i) { if (i !== t && t.checked && (excl.indexOf(t.value) >= 0 || excl.indexOf(i.value) >= 0)) i.checked = false; });
-          if (q.max && all.filter(function (i) { return i.checked; }).length > q.max) { t.checked = false; status($('#aiQStatus'), 'Elegí hasta ' + q.max + '.', 'error'); return; }
-          answers[q.k] = all.filter(function (i) { return i.checked; }).map(function (i) { return i.value; });
-        } else answers[q.k] = t.value;
+          var vals = all.filter(function (i) { return i.checked; }).map(function (i) { return i.value; });
+          if (vals.length) answers[k] = vals; else delete answers[k];
+        } else answers[k] = t.value;
+        fs.classList.remove('is-missing'); fs.removeAttribute('aria-invalid');
         status($('#aiQStatus'), '');
+        // Si cambia una respuesta de la que depende otra pregunta de esta pantalla, se vuelve a dibujar.
+        if (sc.items.some(function (x) { return x.showIf; })) {
+          var before = vis.length; vis = EV.visibleItems(sc, answers);
+          if (vis.length !== before) { renderScreen(); var f = $('input[name="q_' + k + '"]:checked', box); if (f) f.focus(); }
+        }
       };
-      $('#aiQBack').textContent = 'Atrás';
-      $('#aiQNext').textContent = qi === quiz.length - 1 ? 'Terminar' : 'Siguiente';
+      $('#aiQNext').textContent = qi === screens.length - 1 ? 'Ver mi resultado' : 'Siguiente';
     }
-    $('#aiQBack').addEventListener('click', function () { if (qi === 0) show(measured ? 'camara' : 'intro'); else { qi--; renderQuestion(); } });
+    $('#aiQBack').addEventListener('click', function () {
+      if (qi > 0) { qi--; renderScreen(); return; }
+      if (photo) { pending = photo; photo = null; renderReview(pending); } else show('intro');
+    });
     $('#aiQNext').addEventListener('click', function () {
-      var a = answers[quiz[qi].k];
-      if (!a || (Array.isArray(a) && !a.length)) { status($('#aiQStatus'), 'Elegí una opción para seguir.', 'error'); return; }
-      if (qi < quiz.length - 1) { qi++; renderQuestion(); return; }
+      var miss = EV.missingIn(screens[qi], answers);
+      if (miss.length) {
+        miss.forEach(function (k) { var fs = $('fieldset[data-k="' + k + '"]', $('#aiQ')); if (fs) { fs.classList.add('is-missing'); fs.setAttribute('aria-invalid', 'true'); } });
+        status($('#aiQStatus'), miss.length > 1 ? 'Faltan ' + miss.length + ' respuestas en esta pantalla.' : 'Falta una respuesta en esta pantalla.', 'error');
+        var first = $('fieldset.is-missing input', $('#aiQ')); if (first) first.focus();
+        return;
+      }
+      if (qi < screens.length - 1) { qi++; renderScreen(); $('#aiQStep').scrollIntoView({ block: 'nearest' }); return; }
       $('#aiQBar').style.width = '100%';
       Track.send('analisis_cuestionario_completo', { dedupeKey: 'analisis_cuestionario:' + PAGE_LOADED_AT });
-      if (session) submit(); else show('datos');
+      if (session) finish(); else show('datos');
     });
 
-    // 4. Datos de contacto, antes de ver el resultado
+    // 4. Datos de contacto, antes de ver el resultado (solo contacto: las respuestas y la foto no se envían)
     bindLeadForm({ form: $('#aiLead'), btn: $('#aiLeadBtn'), statusEl: $('#aiLeadStatus'), p: 'a', e: 'ea', origin: 'analisis',
       onSaved: function () {
-        submit();
+        finish();
         if (!store.get('sessionStorage', 'cc_booking')) prepareScheduling();
       } });
 
-    // Envío: el servidor aplica las reglas y guarda el resultado. Las fotos nunca se envían.
-    function submit() {
-      if (busy) return;
-      busy = true;
-      var body = { requestId: session && session.requestId, token: session && session.token, adult: true, answers: answers };
-      if (measured) body.photo = { findings: measured.findings, metrics: measured.metrics };
-      api('analyze', body, 30000).then(function (r) {
-        busy = false;
-        if (r.code === 'invalid_token') {
-          store.del('sessionStorage', 'cc_lead'); session = null; show('datos');
-          status($('#aiLeadStatus'), 'Tu sesión venció. Volvé a confirmar tus datos.', 'error'); return;
-        }
-        if (!r.ok) { show(session ? 'quiz' : 'datos'); status(session ? $('#aiQStatus') : $('#aiLeadStatus'), 'No pudimos preparar tu resultado. Probá de nuevo en un momento.', 'error'); return; }
-        renderResult(r);
+    // 5. Informe: se arma en el teléfono con datos estructurados; si algo falla se informa y se puede reintentar
+    function finish() {
+      try {
+        report = EV.buildReport(answers, photo ? { observations: photo.observations } : null);
+        renderReport(report);
         Track.send('analisis_resultado', { dedupeKey: 'analisis_resultado:' + PAGE_LOADED_AT });
-      });
+      } catch (e) {
+        report = null;
+        var out = $('#aiResult'); out.innerHTML = '';
+        out.appendChild(el('h3', null, 'No pudimos preparar tu resultado'));
+        out.appendChild(el('p', null, 'Ocurrió un error al armar la orientación. No te mostramos un resultado incompleto.'));
+        var acts = el('div', 'ai-actions'), again = el('button', 'btn', 'Reintentar'), restart = el('button', 'btn btn-ghost', 'Volver a empezar');
+        again.type = restart.type = 'button';
+        again.addEventListener('click', finish); restart.addEventListener('click', restartAll);
+        acts.appendChild(again); acts.appendChild(restart); out.appendChild(acts);
+        show('resultado'); out.focus({ preventScroll: true });
+      }
     }
+    function restartAll() { discardPhotos(); answers = {}; report = null; $('#aiResult').innerHTML = ''; show('intro'); }
 
-    // 5. Resultado: cada conclusión muestra su origen
-    var ORIGIN_LABEL = { 'cuestionario': 'Según tus respuestas', 'foto': 'Según tus fotos', 'foto y cuestionario': 'Según tus fotos y respuestas', 'evaluación presencial': 'En la consulta' };
-    function origin(o) { return el('span', 'ai-origin' + (/foto/.test(o) ? ' is-photo' : o === 'evaluación presencial' ? ' is-visit' : ''), ORIGIN_LABEL[o] || o); }
-    function block(title, items, cls) {
-      var b = el('div', 'ai-block' + (cls ? ' ' + cls : '')); b.appendChild(el('h4', null, title));
-      var ul = el('ul', 'ai-focus');
-      items.forEach(function (i) {
-        var li = el('li', null, i.text + ' ');
-        if (i.beta) li.appendChild(el('span', 'ai-beta', 'Análisis en prueba'));
-        li.appendChild(origin(i.origin)); ul.appendChild(li);
-      });
-      b.appendChild(ul); return b;
-    }
-    /** Dibujo de las zonas que realmente se midieron en la foto de frente (no es un mapa de lesiones). */
-    function zonesFigure(findings) {
-      var front = shots[0]; if (!front) return null;
-      var src = front.canvas, P = front.P, k = 280 / src.width, c = document.createElement('canvas');
-      c.width = 280; c.height = Math.round(src.height * k);
-      var x = c.getContext('2d'); x.save(); x.translate(c.width, 0); x.scale(-1, 1); x.drawImage(src, 0, 0, c.width, c.height); x.restore();
-      var xs = P.map(function (p) { return p.x; }), r = (Math.max.apply(null, xs) - Math.min.apply(null, xs)) * c.width * 0.07;
-      function mark(ids, hit) { // zona medida: contorno fino; relleno suave si ahí se midió brillo, textura o tono
-        ids.forEach(function (i) {
-          x.beginPath(); x.arc((1 - P[i].x) * c.width, P[i].y * c.height, r, 0, Math.PI * 2);
-          x.lineWidth = 1; x.strokeStyle = 'rgba(255,255,255,.6)'; x.fillStyle = hit ? 'rgba(255,255,255,.28)' : 'rgba(255,255,255,0)';
-          x.fill(); x.stroke();
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    function svgEl(tag, attrs) { var e = document.createElementNS(SVGNS, tag); Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); }); return e; }
+    /**
+     * Foto interactiva: un solo SVG con la imagen y las marcas en las MISMAS coordenadas (píxeles de la foto
+     * original), así quedan alineadas al cambiar el tamaño o la orientación de la pantalla. El recorte es el viewBox
+     * y el espejo es una transformación: la foto original no se modifica.
+     */
+    function photoFigure(ph, seen, onSelect) {
+      var W = ph.canvas.width, H = ph.canvas.height, all = [];
+      Object.keys(ph.regions).forEach(function (z) { all = all.concat(ph.regions[z]); });
+      var xs = ph.P.map(function (p) { return p.x * W; }), ys = ph.P.map(function (p) { return p.y * H; });
+      var fx0 = Math.min.apply(null, xs), fx1 = Math.max.apply(null, xs), fy0 = Math.min.apply(null, ys), fy1 = Math.max.apply(null, ys), pad = (fx1 - fx0) * 0.14;
+      var x0 = Math.max(0, fx0 - pad), x1 = Math.min(W, fx1 + pad), y0 = Math.max(0, fy0 - pad * 1.3), y1 = Math.min(H, fy1 + pad * 0.6);
+      var vw = x1 - x0, vh = y1 - y0;
+      var mx = function (x) { return ph.mirror ? x0 + x1 - x : x; };
+      var svg = svgEl('svg', { viewBox: [x0, y0, vw, vh].map(function (v) { return v.toFixed(1); }).join(' '), class: 'ai-photo-svg', role: 'group', 'aria-label': 'Tu foto con las zonas observadas' });
+      var g = svgEl('g', ph.mirror ? { transform: 'translate(' + (x0 + x1).toFixed(1) + ' 0) scale(-1 1)' } : {});
+      var im = svgEl('image', { x: 0, y: 0, width: W, height: H, preserveAspectRatio: 'none' });
+      im.setAttribute('href', ph.url); im.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', ph.url);
+      g.appendChild(im); svg.appendChild(g);
+      var marks = svgEl('g', { class: 'ai-marks' }), badges = svgEl('g', { class: 'ai-marks' }), r = vw * 0.04, used = [];
+      seen.forEach(function (o) {
+        if (!o.geometry) return;
+        var color = EV.CAT[o.category].color;
+        var area = svgEl('g', { class: 'ai-area', 'data-n': o.n });
+        o.geometry.polygons.forEach(function (poly) {
+          area.appendChild(svgEl('polygon', { points: poly.map(function (p) { return mx(p[0]).toFixed(1) + ',' + p[1].toFixed(1); }).join(' '),
+            fill: color, 'fill-opacity': '0.16', stroke: color, 'stroke-width': (vw * 0.006).toFixed(2), 'stroke-dasharray': (vw * 0.018).toFixed(1) + ' ' + (vw * 0.012).toFixed(1), 'stroke-linejoin': 'round' }));
         });
-      }
-      var has = function (k2) { return findings.indexOf(k2) >= 0; };
-      mark(ZONE_T, has('brillo_zona_t') || has('brillo_general'));
-      mark(CHEEK_R.concat(CHEEK_L), has('textura_irregular') || has('tono_desparejo') || has('enrojecimiento_visible') || has('brillo_general') || has('poros_visibles_posibles'));
-      // Elementos puntuales: cada marca está donde se detectó (no es un mapa inventado).
-      var used = {};
-      (measured && measured.spots || []).forEach(function (sp) {
-        var st = SPOT_STYLE[sp.type]; if (!st) return; used[sp.type] = true;
-        x.beginPath(); x.arc((1 - sp.x) * c.width, sp.y * c.height, Math.max(4, sp.r * c.width), 0, Math.PI * 2);
-        x.lineWidth = 2.5; x.strokeStyle = '#fff'; x.stroke(); // borde blanco para que se vea sobre cualquier tono de piel
-        x.lineWidth = 1.6; x.strokeStyle = st.color; x.setLineDash(sp.type === 'mancha' ? [3, 2] : []); x.stroke(); x.setLineDash([]);
+        marks.appendChild(area);
+        // Número: en el centro de la primera zona, corrido si ya hay otro número ahí (nunca dos en el mismo lugar).
+        var p0 = o.geometry.polygons[0], cx = 0, cy = 0;
+        p0.forEach(function (p) { cx += mx(p[0]); cy += p[1]; }); cx /= p0.length; cy /= p0.length;
+        while (used.some(function (u) { return Math.hypot(u[0] - cx, u[1] - cy) < r * 2.2; })) cy += r * 2.3;
+        used.push([cx, cy]);
+        var b = svgEl('g', { class: 'ai-badge', 'data-n': o.n, tabindex: '0', role: 'button', 'aria-label': 'Observación ' + o.n + ': ' + o.label + ', ' + o.zone });
+        b.appendChild(svgEl('circle', { cx: cx.toFixed(1), cy: cy.toFixed(1), r: r.toFixed(1), fill: color, stroke: '#fff', 'stroke-width': (r * 0.22).toFixed(1) }));
+        var t = svgEl('text', { x: cx.toFixed(1), y: cy.toFixed(1), 'font-size': (r * 1.15).toFixed(1), 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#fff' });
+        t.textContent = String(o.n); b.appendChild(t);
+        b.addEventListener('click', function () { onSelect(o.n, true); });
+        b.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(o.n, true); } });
+        badges.appendChild(b);
       });
-      var fig = el('figure', 'ai-zones'); fig.appendChild(c);
-      var cap = el('figcaption', null, 'Círculos blancos: zonas medidas (más claros si se identificó brillo, textura o tono). Marcas de color: lo detectado.');
-      var leg = el('ul', 'ai-legend');
-      Object.keys(SPOT_STYLE).forEach(function (t) {
-        if (!used[t]) return;
-        var li = el('li'), dot = el('span', 'ai-legend-dot'); dot.style.borderColor = SPOT_STYLE[t].color;
-        li.appendChild(dot); li.appendChild(document.createTextNode(SPOT_STYLE[t].label)); leg.appendChild(li);
-      });
-      fig.appendChild(cap); if (leg.children.length) fig.appendChild(leg);
-      return fig;
+      svg.appendChild(marks); svg.appendChild(badges);
+      return svg;
     }
-    var SPOT_STYLE = { grano: { color: '#e5484d', label: 'Posible grano' }, punto_negro: { color: '#1f1f1f', label: 'Posible punto negro' },
-      milium: { color: '#3b82f6', label: 'Posible milium' }, lunar: { color: '#8b5a2b', label: 'Lunar' }, mancha: { color: '#9b59b6', label: 'Posible mancha' } };
+    function section(title, tag) {
+      var s = el('section', 'ai-sec'), h = el('h4', null, title);
+      if (tag) h.appendChild(el('span', 'ai-origin', tag));
+      s.appendChild(h); return s;
+    }
     function waSummary(r) {
-      var obs = r.observations.map(function (o) { return o.text.replace(/\.$/, '').toLowerCase(); });
-      return 'Hola, hice la evaluación de piel con IA en la web. Resultado orientativo: piel ' + r.profile.type.toLowerCase() + '.' +
-        (obs.length ? ' Identificado: ' + obs.join('; ') + '.' : '') +
-        (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '') + ' Quisiera recibir mi resultado y consultar.';
+      return 'Hola, hice la evaluación cosmética en la web. ' + r.summary.join(' ') +
+        (session && session.requestId ? ' Mi solicitud es ' + session.requestId + '.' : '') + ' Quisiera consultar.';
     }
-    function renderResult(r) {
+    function renderReport(r) {
       var out = $('#aiResult'); out.innerHTML = '';
-      if (r.example) out.appendChild(el('p', 'ai-example', 'Resultado de ejemplo (vista previa): el perfil es fijo; las fotos sí se midieron en este dispositivo.'));
-      var head = el('div', 'ai-result-head'), h = el('h3');
-      if (r.profile.type !== 'Indeterminada') { h.appendChild(document.createTextNode('Tu piel parece ')); h.appendChild(el('strong', null, r.profile.type.toLowerCase())); }
-      else h.textContent = 'Tipo de piel por definir en la consulta';
-      head.appendChild(h); head.appendChild(origin(r.profile.origin)); out.appendChild(head);
-      if (r.profile.warning) out.appendChild(el('p', 'ai-warn', r.profile.warning));
-      var c = el('div', 'ai-block'); c.appendChild(el('h4', null, 'Lo que identificamos en tu piel'));
-      if (r.photo === 'analizada') {
-        var fig = zonesFigure(r.observations.map(function (o) { return o.rule.replace(/^OBS-/, ''); }));
-        if (fig) c.appendChild(fig);
-        if (r.observations.length) {
-          var ul = el('ul', 'ai-focus');
-          r.observations.forEach(function (o) { var li = el('li', null, o.text + ' '); if (o.beta) li.appendChild(el('span', 'ai-beta', 'Análisis en prueba')); ul.appendChild(li); });
-          c.appendChild(ul);
-        } else c.appendChild(el('p', 'ai-note', 'En tus fotos no se midieron diferencias claras de brillo, textura o tono.'));
-        c.appendChild(el('p', 'ai-note', r.photoLimits));
-      } else c.appendChild(el('p', 'ai-note', 'No sumaste fotos: la orientación sale de tus respuestas.'));
-      out.appendChild(c);
-      if (r.needs.length) out.appendChild(block('Lo que contaste de tu piel', r.needs));
-      var d = block('Qué podría aportarte una limpieza facial', r.benefits);
-      r.limits.forEach(function (l) { d.appendChild(el('p', 'ai-note', l.text)); });
-      out.appendChild(d);
-      if (r.toEvaluate.length) out.appendChild(block('Para ver con la profesional en la consulta', r.toEvaluate, 'ai-eval'));
-      if (r.tips.length) {
-        var t = el('div', 'ai-block'); t.appendChild(el('h4', null, 'Cuidados básicos'));
-        var ul3 = el('ul', 'ai-tipsout'); r.tips.forEach(function (x) { ul3.appendChild(el('li', null, x.text)); }); t.appendChild(ul3); out.appendChild(t);
+      var ST = EV.ST, seen = r.observations.filter(function (o) { return o.status === ST.SEEN; });
+
+      // A. Tu evaluación cosmética
+      var a = el('section', 'ai-sec ai-sec-head');
+      a.appendChild(el('h3', null, 'Tu evaluación cosmética'));
+      a.appendChild(el('p', 'ai-summary', r.summary.join(' ')));
+      if (r.tendency.note) a.appendChild(el('p', 'ai-note', r.tendency.note));
+      else if (r.tendency.key) a.appendChild(el('p', 'ai-note', 'La tendencia sale de tus respuestas, no de la foto. La confirma la cosmetóloga.'));
+      out.appendChild(a);
+
+      // B. Lo que se observa en tus fotos
+      var b = section('Lo que se observa en tu foto', r.photo === 'analizada' ? 'Foto' : null);
+      if (r.photo === 'analizada' && photo) {
+        var cards = el('ol', 'ai-cards'), detail = el('p', 'ai-mark-detail'), svg;
+        detail.setAttribute('aria-live', 'polite');
+        var select = function (n, fromMark) {
+          var cur = svg && svg.getAttribute('data-sel');
+          var next = cur === String(n) ? '' : String(n);
+          if (svg) { svg.setAttribute('data-sel', next); svg.classList.toggle('has-sel', !!next); }
+          $$('.ai-area, .ai-badge', svg || out).forEach(function (m) { m.classList.toggle('is-sel', m.getAttribute('data-n') === next); });
+          $$('.ai-card', cards).forEach(function (c) {
+            var on = c.getAttribute('data-n') === next; c.classList.toggle('is-sel', on);
+            $('button', c).setAttribute('aria-expanded', on ? 'true' : 'false'); $('.ai-card-body', c).hidden = !on;
+          });
+          var o = seen.filter(function (x) { return String(x.n) === next; })[0];
+          detail.textContent = o ? o.n + '. ' + o.label + ' (' + o.zone + '): ' + o.description : '';
+          if (o && fromMark) { var c = $('.ai-card[data-n="' + n + '"]', cards); if (c) c.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+        };
+        if (seen.length) {
+          var fig = el('figure', 'ai-photo');
+          svg = photoFigure(photo, seen, select);
+          fig.appendChild(svg);
+          var tg = el('button', 'ai-toggle', 'Ocultar marcas'); tg.type = 'button'; tg.setAttribute('aria-pressed', 'true');
+          tg.addEventListener('click', function () {
+            var on = tg.getAttribute('aria-pressed') !== 'true';
+            tg.setAttribute('aria-pressed', on ? 'true' : 'false'); tg.textContent = on ? 'Ocultar marcas' : 'Mostrar marcas';
+            svg.classList.toggle('marks-off', !on);
+          });
+          var cap = el('figcaption'); cap.appendChild(el('span', null, 'Tocá un número para ver qué se observó.')); cap.appendChild(tg);
+          fig.appendChild(cap); fig.appendChild(detail); b.appendChild(fig);
+          seen.forEach(function (o) {
+            var li = el('li', 'ai-card'); li.setAttribute('data-n', o.n);
+            var btn = el('button', 'ai-card-head'); btn.type = 'button'; btn.setAttribute('aria-expanded', 'false');
+            var num = el('span', 'ai-num', String(o.n)); num.style.background = EV.CAT[o.category].color; num.setAttribute('aria-hidden', 'true');
+            btn.appendChild(num);
+            var tt = el('span', 'ai-card-title'); tt.appendChild(el('strong', null, o.label)); tt.appendChild(el('span', 'ai-card-zone', o.zone)); btn.appendChild(tt);
+            btn.addEventListener('click', function () { select(o.n, false); });
+            var body = el('div', 'ai-card-body'); body.hidden = true;
+            body.appendChild(el('p', null, o.description));
+            body.appendChild(el('p', 'ai-limit', o.limitation));
+            li.appendChild(btn); li.appendChild(body); cards.appendChild(li);
+          });
+          b.appendChild(cards);
+        } else b.appendChild(el('p', null, 'En tu foto no se observó nada destacable en lo que se pudo evaluar.'));
+        var notSeen = r.observations.filter(function (o) { return o.status === ST.NOT_SEEN; });
+        if (notSeen.length) {
+          var ns = el('p', 'ai-note');
+          ns.appendChild(el('strong', null, 'No se observó en esta foto: '));
+          ns.appendChild(document.createTextNode(notSeen.map(function (o) { return o.label.toLowerCase(); }).join(', ') + '. Que no se vea en una foto no significa que no exista.'));
+          b.appendChild(ns);
+        }
+        var na = r.observations.filter(function (o) { return o.status === ST.NA; });
+        if (na.length) {
+          var det = el('details', 'ai-na'), sm = el('summary', null, 'No evaluable en esta foto (' + na.map(function (o) { return o.label.toLowerCase(); }).join(', ') + ')');
+          det.appendChild(sm);
+          var ul = el('ul');
+          na.forEach(function (o) { var li = el('li'); li.appendChild(el('strong', null, o.label + ': ')); li.appendChild(document.createTextNode(o.reason)); ul.appendChild(li); });
+          det.appendChild(ul); b.appendChild(det);
+        }
+      } else b.appendChild(el('p', 'ai-note', 'No sumaste foto: lo que sigue sale de tus respuestas.'));
+      out.appendChild(b);
+
+      // C. Lo que nos contaste (solo cuestionario; nunca genera marcas sobre la foto)
+      if (r.declared.length) {
+        var c = section('Lo que nos contaste', 'Tus respuestas'), ulc = el('ul', 'ai-list');
+        r.declared.forEach(function (d) { ulc.appendChild(el('li', null, d.text)); });
+        c.appendChild(ulc); out.appendChild(c);
       }
-      out.appendChild(el('p', 'ai-disclaimer', 'Este contenido es netamente orientativo y analizado por IA, no es certificado por profesionales.'));
+
+      // D. Qué podemos valorar en tu limpieza facial
+      var d = section('Qué podemos valorar en tu limpieza facial'), uld = el('ul', 'ai-orient');
+      r.orientations.forEach(function (o) {
+        var li = el('li'); li.appendChild(el('strong', null, o.text));
+        li.appendChild(el('span', 'ai-why', 'Por qué: ' + o.because.join(' ')));
+        uld.appendChild(li);
+      });
+      d.appendChild(uld);
+      d.appendChild(el('p', 'ai-note', 'Las técnicas (por ejemplo puntas de diamante, extracción, LED o máscara descongestiva) las elige la ' + EV.PRO + ' en la consulta, según lo que observe y lo que tolere tu piel. Una sesión no cierra poros de forma permanente ni elimina manchas.'));
+      out.appendChild(d);
+
+      // E. Revisión previa (solo por respuestas concretas)
+      if (r.preReview.length) {
+        var med = r.preReview.some(function (p) { return p.kind === 'medica'; });
+        var e = el('section', 'ai-sec ai-review-box' + (med ? ' is-medical' : ''));
+        e.appendChild(el('h4', null, 'Antes de tu sesión'));
+        var ule = el('ul', 'ai-list'); r.preReview.forEach(function (p) { ule.appendChild(el('li', null, p.text)); });
+        e.appendChild(ule); out.appendChild(e);
+      }
+
+      // F. Próximo paso
+      var f = el('section', 'ai-sec ai-next'); f.appendChild(el('h4', null, 'Próximo paso'));
+      var medical = r.preReview.some(function (p) { return p.kind === 'medica'; });
+      f.appendChild(el('p', null, medical
+        ? 'Si reservás, avisá la zona que nos contaste: no se trabaja sobre ella hasta tener la consulta médica. La sesión de 60 minutos empieza con una evaluación de tu piel.'
+        : 'La sesión de 60 minutos con la ' + EV.PRO + ' empieza con una evaluación de tu piel en persona.'));
       var acts = el('div', 'ai-actions');
-      var wa = String(r.whatsapp || CFG.WHATSAPP_NUMBER || '').replace(/\D/g, '');
-      if (wa) {
-        var w = el('a', 'btn btn-wa', 'Recibir mi resultado por WhatsApp'); w.target = '_blank'; w.rel = 'noopener';
+      var cta = el('a', 'btn', 'Reservar evaluación y limpieza facial'); cta.href = '#reservar';
+      cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
+      acts.appendChild(cta);
+      // El número de WhatsApp llega con la agenda: si todavía no llegó, el botón se agrega cuando llegue.
+      var addWa = function () {
+        var wa = String(waNumber() || '').replace(/\D/g, '');
+        if (!wa || report !== r || $('.btn-wa', acts)) return !!wa;
+        var w = el('a', 'btn btn-wa', 'Abrir WhatsApp con el resumen'); w.target = '_blank'; w.rel = 'noopener';
         w.href = 'https://wa.me/' + wa + '?text=' + encodeURIComponent(waSummary(r));
         w.addEventListener('click', function () { Track.send('analisis_whatsapp', { dedupeKey: 'analisis_whatsapp:' + PAGE_LOADED_AT }); });
-        acts.appendChild(w);
-      }
-      var cta = el('a', 'btn', 'Reservá tu sesión'); cta.href = '#reservar';
-      cta.addEventListener('click', function () { Track.send('analisis_clic_reserva', { dedupeKey: 'analisis_clic_reserva:' + PAGE_LOADED_AT }); });
-      var again = el('button', 'btn btn-ghost', 'Volver a empezar'); again.type = 'button';
-      again.addEventListener('click', function () { answers = {}; resetShots(); show('intro'); });
-      acts.appendChild(cta); acts.appendChild(again); out.appendChild(acts);
+        acts.appendChild(w); return true;
+      };
+      if (!addWa()) document.addEventListener('cc:whatsapp', addWa, { once: true });
+      f.appendChild(acts);
+      if (session && session.requestId) f.appendChild(shareBox(r));
+      var again = el('button', 'link-btn', 'Volver a empezar (borra la foto y las respuestas)'); again.type = 'button';
+      again.addEventListener('click', restartAll);
+      f.appendChild(again);
+      out.appendChild(f);
+
+      out.appendChild(el('p', 'ai-disclaimer', r.disclaimer));
       show('resultado'); out.focus({ preventScroll: true });
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    /** Envío opcional del resumen a la profesional: consentimiento aparte, solo texto (nunca la foto). */
+    function shareBox(r) {
+      var box = el('div', 'ai-share');
+      box.appendChild(el('p', 'ai-share-title', 'Enviar este resumen a la profesional (opcional)'));
+      box.appendChild(el('p', 'ai-note', 'Así la ' + EV.PRO + ' lo puede leer antes de tu sesión. Se envía el texto de este resultado, no la foto, y queda guardado con tus datos de contacto en la planilla de la clínica. No se usa para otra cosa.'));
+      var fld = el('div', 'field check'), cb = document.createElement('input'), lb = el('label', null, 'Acepto enviar este resumen a la profesional.');
+      cb.type = 'checkbox'; cb.id = 'aiShareOk'; lb.htmlFor = 'aiShareOk'; fld.appendChild(cb); fld.appendChild(lb); box.appendChild(fld);
+      var btn = el('button', 'btn btn-ghost btn-sm', 'Enviar resumen'); btn.type = 'button';
+      var st = el('p', 'form-status'); st.setAttribute('role', 'status');
+      btn.addEventListener('click', function () {
+        if (!cb.checked) { status(st, 'Marcá la casilla si querés enviarlo.', 'error'); return; }
+        setBusy(btn, true, 'Enviando…');
+        var body = { requestId: session.requestId, token: session.token, adult: true, share: true, report: EV.compactReport(r) };
+        if (photo && photo.measures) body.metrics = photo.measures.raw; // números de la foto, para calibrar (no la imagen)
+        api('saveReport', body, 20000).then(function (res) {
+          setBusy(btn, false, 'Enviar resumen');
+          if (res && res.ok) { status(st, 'Listo: la profesional lo va a poder leer antes de tu sesión.', 'ok'); btn.disabled = true; cb.disabled = true; Track.send('analisis_resumen_enviado', { dedupeKey: 'analisis_resumen:' + PAGE_LOADED_AT }); return; }
+          if (res && res.code === 'invalid_token') { status(st, 'Tu sesión venció. Volvé a empezar para enviarlo.', 'error'); return; }
+          status(st, 'No pudimos enviarlo. Probá de nuevo en un momento.', 'error');
+        });
+      });
+      box.appendChild(btn); box.appendChild(st);
+      return box;
     }
   })();
 
